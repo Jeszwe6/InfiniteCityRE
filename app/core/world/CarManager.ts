@@ -8,13 +8,20 @@ import type { VehicleModelType } from "./Vehicle";
 
 import { Road } from "../world/Road";
 
+import TrafficLightController from "../traffic/TrafficLightController";
+
 /**
- * ==========================================
- * Traffic Transition
- * ==========================================
- *
- * اطلاعات حرکت خودرو بین دو Road.
- */
+
+==========================================
+
+Traffic Transition
+
+==========================================
+
+
+
+اطلاعات حرکت خودرو بین دو Road.
+*/
 interface TrafficTransition {
   fromRoad: Road;
   toRoad: Road;
@@ -29,15 +36,25 @@ interface TrafficTransition {
   finalDirection: VehicleDirection;
   finalDistance: number;
 
-  elapsed: number;
-  duration: number;
+  /** فاصله واقعی طی‌شده روی منحنی، مستقل از تعداد فریم‌ها. */
+  distanceTravelled: number;
+
+  /** جدول طول قوس برای تبدیل مسافت طی‌شده به پارامتر Bezier. */
+  arcLength: number;
+  arcLengthSamples: number[];
+
+  /** اگر Collision Guard فریم قبل مانع حرکت شده باشد، فریم بعد ترمز نرم می‌شود. */
+  blockedLastFrame: boolean;
 }
 
 /**
- * ==========================================
- * Active Vehicle Data
- * ==========================================
- */
+
+==========================================
+
+Active Vehicle Data
+
+==========================================
+*/
 interface ActiveVehicleData {
   vehicle: Vehicle;
 
@@ -48,44 +65,78 @@ interface ActiveVehicleData {
   trafficTransition: TrafficTransition | null;
 
   /**
-   * سرعت طبیعی این خودرو.
-   *
-   * این مقدار در طول عمر خودرو ثابت می‌ماند تا هنگام
-   * عبور از Roadهای مختلف، سرعت ناگهان عوض نشود.
-   */
+
+سرعت طبیعی این خودرو.
+
+
+
+این مقدار در طول عمر خودرو ثابت می‌ماند تا هنگام
+
+عبور از Roadهای مختلف، سرعت ناگهان عوض نشود.
+*/
   cruiseSpeed: number;
 
   /**
-   * سرعت واقعی مورد استفاده برای حرکت Transform خودرو.
-   *
-   * این مقدار هر Frame به‌صورت نرم به targetSpeed نزدیک می‌شود.
-   */
+
+سرعت واقعی مورد استفاده برای حرکت Transform خودرو.
+
+
+
+این مقدار هر Frame به‌صورت نرم به targetSpeed نزدیک می‌شود.
+*/
   motionSpeed: number;
 
   /**
-   * سرعت هدف Traffic.
-   *
-   * Traffic فقط این مقدار را تغییر می‌دهد؛ خود حرکت با
-   * acceleration/deceleration نرم انجام می‌شود.
-   */
+
+سرعت هدف Traffic.
+
+
+
+Traffic فقط این مقدار را تغییر می‌دهد؛ خود حرکت با
+
+acceleration/deceleration نرم انجام می‌شود.
+*/
   targetSpeed: number;
 
   /**
-   * زمان انتظار خودرو قبل از تقاطع.
-   */
+
+زمان انتظار خودرو قبل از تقاطع.
+*/
   intersectionWaitTime: number;
 
   /**
-   * آیا خودرو در صف تقاطع قرار دارد؟
-   */
+
+آیا خودرو در صف تقاطع قرار دارد؟
+*/
   waitingAtIntersection: boolean;
+
+  /**
+
+پنجره کوتاه عبور اجباری برای جلوگیری از Deadlock در تقاطع.
+*/
+  intersectionReleaseTime: number;
+
+  /** آخرین موقعیت ثبت‌شده برای تشخیص گیرکردن خودرو. */
+  lastProgressPosition: THREE.Vector3;
+
+  /** Snapshot حرکت در ابتدای فریم برای Collision Guard پایدار. */
+  frameStartPosition: THREE.Vector3;
+  frameStartMotionSpeed: number;
+  frameStartDirection: VehicleDirection;
+  frameStartTrafficTransition: TrafficTransition | null;
+
+  /** مدت‌زمانی که خودرو بدون پیشرفت مانده است. */
+  stalledTime: number;
 }
 
 /**
- * ==========================================
- * Vehicle Profile
- * ==========================================
- */
+
+==========================================
+
+Vehicle Profile
+
+==========================================
+*/
 interface VehicleProfile {
   type: VehicleModelType;
   weight: number;
@@ -93,174 +144,353 @@ interface VehicleProfile {
 
 export default class CarManager {
   /**
-   * ==========================================
-   * Pool / Spawn
-   * ==========================================
-   */
+
+==========================================
+
+Pool / Spawn
+
+==========================================
+*/
 
   private static readonly POOL_SIZE = 160;
 
   /**
-   * تعداد خودروهای اولیه داخل شهر.
-   */
+
+تعداد خودروهای اولیه داخل شهر.
+*/
   private static readonly INITIAL_CARS = 60;
 
   /**
-   * حداقل فاصله برای Spawn.
-   */
+
+حداقل فاصله برای Spawn.
+*/
   private static readonly MIN_SPAWN_DISTANCE = 8;
 
   /**
-   * حداقل فاصله خودرو از دوربین هنگام Spawn/Reposition.
-   *
-   * خودرو باید قبل از ورود به محدوده دید دوربین، مدتی در شهر حرکت کرده باشد.
-   */
+
+حداقل فاصله خودرو از دوربین هنگام Spawn/Reposition.
+*/
   private static readonly SPAWN_MIN_CAMERA_DISTANCE = 24;
 
   /**
-   * حداکثر فاصله ترجیحی برای Spawn/Reposition.
-   *
-   * باعث می‌شود خودروها بی‌جهت در فاصله‌های بسیار دور ایجاد نشوند.
-   */
+
+حداکثر فاصله ترجیحی برای Spawn/Reposition.
+*/
   private static readonly SPAWN_MAX_CAMERA_DISTANCE = 72;
 
   /**
-   * تعداد نمونه‌های بررسی‌شده برای پیدا کردن نقطه امن روی هر Road.
-   */
+
+تعداد نمونه‌های بررسی‌شده برای پیدا کردن نقطه امن روی هر Road.
+*/
   private static readonly SPAWN_POSITION_SAMPLES: number = 7;
 
   /**
-   * ==========================================
-   * Continuous Traffic
-   * ==========================================
-   *
-   * تعداد خودروهایی که باید تا زمانی که
-   * سایت باز است در شهر فعال باشند.
+
+==========================================
+
+Camera Frustum Vehicle Fade
+
+==========================================
+
+خودرو تا وقتی واقعاً داخل محدوده دید Camera است کاملاً واضح می‌ماند.
+Fade فقط بعد از خروج خودرو از محدوده دید شروع می‌شود.
+این Fade هیچ اثری روی Recycle یا Traffic ندارد.
+*/
+  private static readonly VEHICLE_FADE_MIN_OPACITY = 0.18;
+
+  /**
+   * میزان فاصله خارج‌شدن از لبه تصویر که طی آن Fade کامل می‌شود.
+   * این مقدار بر اساس NDC است و به فاصله خودرو از Camera وابسته نیست.
    */
+  private static readonly VEHICLE_FADE_NDC_RANGE = 0.18;
+
+  /**
+
+==========================================
+
+Continuous Traffic
+
+==========================================
+*/
+
   private static readonly TARGET_ACTIVE_CARS = 60;
 
-  /**
-   * فاصله زمانی بین تلاش‌های پر کردن دوباره
-   * ترافیک.
-   */
   private static readonly REFILL_INTERVAL = 0.25;
 
-
   /**
-   * ==========================================
-   * Vehicle Following
-   * ==========================================
-   */
 
-  /**
-   * فاصله‌ای که خودرو جلویی از آن نزدیک‌تر
-   * باشد، خودرو کاهش سرعت می‌دهد.
-   */
+==========================================
+
+Vehicle Following
+
+==========================================
+*/
+
   private static readonly FRONT_DETECTION_DISTANCE = 10;
 
-  /**
-   * فاصله امن پشت خودرو.
-   */
   private static readonly SAFE_FOLLOW_DISTANCE = 5.5;
 
-  /**
-   * ==========================================
-   * Physical Vehicle Collision
-   * ==========================================
-   *
-   * فاصله حداقلی فیزیکی بین دو خودرو.
-   */
-  private static readonly VEHICLE_COLLISION_DISTANCE = 2.8;
+  /** زمان لازم برای تشخیص گیرکردن خودروی خارج از دید. */
+  private static readonly STALLED_VEHICLE_RECOVERY_SECONDS = 8;
+
+  /** فاصله زمانی بین تلاش‌های بازیابی ناموفق. */
+  private static readonly STALLED_VEHICLE_RETRY_SECONDS = 3;
+
+  /** سرعت محدود برای آزادکردن یک خودرو از بن‌بست طولانی. */
+  private static readonly DEADLOCK_RELEASE_SPEED = 1.35;
+
+  /** مدت مجاز حرکت اضطراری برای بازکردن گره ترافیک. */
+  private static readonly DEADLOCK_RELEASE_DURATION = 2.25;
+
+  /** حداقل جابه‌جایی لازم برای تشخیص پیشرفت. */
+  private static readonly VEHICLE_PROGRESS_EPSILON = 0.01;
 
   /**
-   * چند ثانیه آینده برای پیش‌بینی برخورد
-   * بررسی می‌شود.
-   */
+
+==========================================
+
+Physical Vehicle Collision
+
+==========================================
+*/
+
+  private static readonly VEHICLE_COLLISION_DISTANCE = 4.0;
+
   private static readonly VEHICLE_PREDICTION_TIME = 0.12;
 
   /**
-   * ==========================================
-   * Lane Safety
-   * ==========================================
-   *
-   * Lane 0:
-   * -2 -> -1.5
-   *
-   * Lane 1:
-   * +2 -> +1.5
-   */
+
+==========================================
+
+Lane Safety
+
+==========================================
+*/
+
   private static readonly TRAFFIC_LANE_SAFETY_OFFSET = 0.5;
 
-  /**
-   * ارتفاع خودرو.
-   */
   private static readonly VEHICLE_Y = 0.16;
 
   /**
-   * ==========================================
-   * Speed
-   * ==========================================
-   */
 
-  private static readonly MIN_SPEED = 2.5;
-  private static readonly MAX_SPEED = 5.5;
+==========================================
 
-  /**
-   * ==========================================
-   * Smooth Vehicle Motion
-   * ==========================================
-   *
-   * سرعت خودروها هیچ‌وقت به‌صورت ناگهانی از حرکت به توقف
-   * یا از توقف به حرکت تغییر نمی‌کند.
-   */
-  private static readonly ACCELERATION = 4.5;
-  private static readonly DECELERATION = 6.5;
+Speed
+
+==========================================
+*/
+
+  private static readonly MIN_SPEED = 1.8;
+  private static readonly MAX_SPEED = 3.4;
 
   /**
-   * ==========================================
-   * Road / Transition
-   * ==========================================
-   */
+
+==========================================
+
+Smooth Vehicle Motion
+
+==========================================
+*/
+
+  private static readonly ACCELERATION = 1.65;
+  private static readonly DECELERATION = 2.1;
+  private static readonly TRAFFIC_LIGHT_APPROACH_DECELERATION = 1.65;
+
+  /**
+
+==========================================
+
+Road / Transition
+
+==========================================
+*/
 
   private static readonly ROAD_CONNECTION_DISTANCE = 5;
 
-  private static readonly TRANSITION_TRIGGER_DISTANCE = 3.5;
+  private static readonly TRANSITION_TRIGGER_DISTANCE = 1.0;
 
   private static readonly TRANSITION_EXIT_DISTANCE = 3.5;
 
   private static readonly TURN_RADIUS = 3.25;
 
-  private static readonly MIN_TRANSITION_DURATION = 0.28;
-
-  private static readonly MAX_TRANSITION_DURATION = 1.1;
-
-  /**
-   * ==========================================
-   * Intersection Rules
-   * ==========================================
-   */
+  /** دقت نمونه‌برداری قوس برای ثابت‌ماندن سرعت در پیچ‌ها. */
+  private static readonly TRANSITION_ARC_LENGTH_SAMPLES = 32;
 
   /**
-   * فقط چند متر آخر قبل از تقاطع.
+   * فاصله امن نزدیک انتهای Road برای Retry کردن Transition.
+   * شکست موقت در پیدا کردن Road بعدی نباید باعث حذف خودرو شود.
    */
-  private static readonly INTERSECTION_APPROACH_DISTANCE = 4;
+  private static readonly ROAD_END_SAFETY_DISTANCE = 0.08;
 
   /**
-   * محدوده تشخیص اشغال بودن تقاطع.
-   */
-  private static readonly INTERSECTION_OCCUPANCY_DISTANCE = 6;
 
+==========================================
+
+Intersection Rules
+
+==========================================
+
+
+
+این بخش عمداً نسبت به نسخه قبلی محدودتر شده است.
+
+
+
+مشکل نسخه قبلی این بود که:
+
+
+
+
+
+INTERSECTION_OCCUPANCY_DISTANCE = 6
+
+
+
+و Priority Blocker تقریباً هر خودروی دیگری را که نزدیک
+
+همان نقطه بود، مانع محسوب می‌کرد.
+
+
+
+نتیجه:
+
+
+
+
+
+خودرو A → توقف
+
+
+
+خودرو B → به خاطر A توقف
+
+
+
+خودرو C → به خاطر B توقف
+
+
+
+و در نهایت بخش بزرگی از Traffic متوقف می‌شد.
+
+
+
+اکنون فقط ناحیه واقعاً مرکزی تقاطع به‌عنوان Occupied در نظر
+
+گرفته می‌شود و Priority فقط بین مسیرهای متعارض اعمال می‌شود.
+*/
 
   /**
-   * فاصله تشکیل صف.
-   */
-  private static readonly INTERSECTION_QUEUE_DISTANCE = 6;
+
+چند متر آخر قبل از شروع واقعی محدوده تقاطع.
+
+این فاصله نسبت به خط توقف سنجیده می‌شود، نه انتهای Road.
+*/
+  private static readonly INTERSECTION_APPROACH_DISTANCE = 10;
 
   /**
-   * ==========================================
-   * Vehicle Profiles
-   * ==========================================
-   */
+
+==========================================
+
+Intersection Stop Line
+
+==========================================
+
+
+
+محل توقف خودرو را نسبت به انتهای واقعی Road تعیین می‌کند.
+
+
+
+در Road فعلی، آخرین خط وسطِ مسیر ورودی تقریباً 2.5 متر
+
+قبل از انتهای Road قرار دارد. بنابراین خودرو باید در همان
+
+محدوده متوقف شود؛ نه چند متر عقب‌تر روی لبه هندسی Intersection.
+
+
+
+این مقدار مستقل از INTERSECTION_SIZE است تا CarManager به عضو
+
+private کلاس Road وابسته نباشد.
+*/
+  private static readonly INTERSECTION_STOP_DISTANCE_FROM_CENTER = 5.25;
+
+  /**
+
+فاصله خودرو از لبه واقعی تقاطع.
+
+
+
+مثبت بودن این مقدار یعنی خودرو چند سانتی‌متر قبل از
+
+شروع محدوده تقاطع می‌ایستد.
+*/
+  private static readonly INTERSECTION_CONFLICT_ZONE_HALF_LENGTH = 6.5;
+
+  /**
+
+حداکثر فاصله‌ای که برای رسیدن دقیق خودرو به خط توقف
+
+اجازه Snap نهایی می‌دهیم. این مقدار فقط چند سانتی‌متر است.
+*/
+  private static readonly INTERSECTION_STOP_SNAP_DISTANCE = 0.12;
+
+  /**
+
+بعد از حداکثر انتظار، خودرو برای مدت کوتاهی اجازه عبور دارد
+
+تا Conflict/Occupancy نتواند آن را دوباره در همان نقطه قفل کند.
+*/
+  private static readonly INTERSECTION_RELEASE_DURATION = 1.8;
+
+  /**
+
+حداکثر زمانی که خودرو به دلیل Conflict/Occupancy
+
+در تقاطع منتظر می‌ماند.
+
+
+
+بعد از این زمان، خودرو دوباره حرکت می‌کند.
+*/
+  private static readonly INTERSECTION_MAX_WAIT_TIME = 1.8;
+
+  /**
+
+شعاع واقعی‌تر برای خودروهایی که واقعاً داخل مرکز تقاطع هستند.
+*/
+  private static readonly INTERSECTION_OCCUPANCY_DISTANCE = 1.0;
+
+  /**
+
+شعاع کمی بزرگ‌تر برای Transitionهایی که هنوز در حال عبور هستند.
+*/
+  private static readonly INTERSECTION_TRANSITION_DISTANCE = 1.0;
+
+  /**
+
+فاصله تقریبی برای تشخیص اینکه دو Approach متعلق به یک تقاطع هستند.
+
+
+
+این مقدار فقط برای مقایسه Approachها است و باعث توقف خودروها نمی‌شود.
+*/
+  private static readonly INTERSECTION_MATCH_DISTANCE = 4.5;
+
+  /**
+
+حداقل اختلاف فاصله برای اینکه خودروی نزدیک‌تر Priority قطعی داشته باشد.
+*/
+  private static readonly INTERSECTION_PRIORITY_MARGIN = 0.25;
+
+  /**
+
+==========================================
+
+Vehicle Profiles
+
+==========================================
+*/
 
   private readonly vehicleProfiles: VehicleProfile[] = [
     { type: "taxi", weight: 10 },
@@ -277,16 +507,17 @@ export default class CarManager {
     { type: "ambulance", weight: 1 },
     { type: "firetruck", weight: 1 },
     { type: "garbage-truck", weight: 2 },
-    { type: "race", weight: 3 },
-    { type: "race-future", weight: 2 },
     { type: "tractor", weight: 1 },
   ];
 
   /**
-   * ==========================================
-   * Runtime
-   * ==========================================
-   */
+
+==========================================
+
+Runtime
+
+==========================================
+*/
 
   private readonly vehicleFactory: VehicleFactory;
 
@@ -294,19 +525,13 @@ export default class CarManager {
 
   private readonly activeVehicles: ActiveVehicleData[] = [];
 
-  /**
-   * خودروهایی که به انتهای Road بدون اتصال رسیده‌اند.
-   *
-   * تا وقتی نقطه Spawn جایگزین پیدا نشود، خودرو از active list حذف نمی‌شود؛
-   * بنابراین دیگر به‌صورت ناگهانی ناپدید نمی‌شود.
-   */
   private readonly pendingRecycleVehicles = new Set<ActiveVehicleData>();
 
   private readonly roads: Road[] = [];
 
   private scene: THREE.Scene | null = null;
 
-  /** Camera واقعی برای تشخیص Frustum و جلوگیری از Teleport داخل تصویر. */
+  /** Camera واقعی برای تشخیص Frustum. */
   private camera: THREE.Camera | null = null;
 
   private initialCarsSpawned = false;
@@ -315,29 +540,36 @@ export default class CarManager {
 
   private initializing = false;
 
-  /**
-   * تایمر Continuous Traffic.
-   */
   private refillTimer = 0;
 
-  /**
-   * آخرین موقعیت دوربین برای Spawn نامحسوس خودروهای Recycle شده.
-   */
   private readonly lastCameraPosition = new THREE.Vector3();
+
   private hasCameraPosition = false;
 
   /**
-   * ==========================================
-   * Reusable Vectors
-   * ==========================================
-   *
-   * برای جلوگیری از ایجاد Vector3های اضافی
-   * در هر Frame.
+   * Materialهای هر خودرو Clone می‌شوند تا Fade یک خودرو
+   * روی خودروهای دیگر اثر نگذارد.
    */
+  private readonly vehicleFadeMaterials = new WeakMap<
+    Vehicle,
+    THREE.Material[]
+  >();
+
+  /**
+
+==========================================
+
+Reusable Vectors
+
+==========================================
+*/
 
   private readonly tempLocalPosition = new THREE.Vector3();
 
   private readonly tempWorldPosition = new THREE.Vector3();
+
+  /** موقعیت پیش‌بینی‌شده Transition؛ جدا از tempWorldPosition که helperها تغییرش می‌دهند. */
+  private readonly tempTransitionCandidatePosition = new THREE.Vector3();
 
   private readonly tempDirection = new THREE.Vector3();
 
@@ -347,9 +579,6 @@ export default class CarManager {
 
   private readonly tempControl = new THREE.Vector3();
 
-  /**
-   * Vectorهای مخصوص Collision Detection.
-   */
   private readonly tempOtherPosition = new THREE.Vector3();
 
   private readonly tempToOther = new THREE.Vector3();
@@ -362,7 +591,6 @@ export default class CarManager {
 
   private readonly tempOtherPredictedPosition = new THREE.Vector3();
 
-  /** Vector موقت برای Project کردن نقطه Spawn روی صفحه دوربین. */
   private readonly tempProjectedPosition = new THREE.Vector3();
 
   constructor() {
@@ -370,10 +598,13 @@ export default class CarManager {
   }
 
   /**
-   * ==========================================
-   * Initialize
-   * ==========================================
-   */
+
+==========================================
+
+Initialize
+
+==========================================
+*/
 
   public async initialize(scene: THREE.Scene): Promise<void> {
     if (this.initialized || this.initializing) {
@@ -396,10 +627,13 @@ export default class CarManager {
   }
 
   /**
-   * ==========================================
-   * Build Vehicle Pool
-   * ==========================================
-   */
+
+==========================================
+
+Build Vehicle Pool
+
+==========================================
+*/
 
   private async buildVehiclePool(): Promise<void> {
     if (!this.scene) {
@@ -409,8 +643,7 @@ export default class CarManager {
     while (this.availableVehicles.length < CarManager.POOL_SIZE) {
       const vehicleType = this.getRandomVehicleType();
 
-      const vehicle =
-        await this.vehicleFactory.createVehicle(vehicleType);
+      const vehicle = await this.vehicleFactory.createVehicle(vehicleType);
 
       vehicle.reset();
 
@@ -421,38 +654,30 @@ export default class CarManager {
       this.availableVehicles.push(vehicle);
     }
 
-    if (
-      this.roads.length > 0 &&
-      !this.initialCarsSpawned
-    ) {
+    if (this.roads.length > 0 && !this.initialCarsSpawned) {
       this.spawnInitialCars();
     }
   }
 
   /**
-   * ==========================================
-   * Set Road Network
-   * ==========================================
-   */
+
+==========================================
+
+Set Road Network
+
+==========================================
+*/
 
   public setRoadNetwork(roads: Road[]): void {
     const validRoads = roads.filter(
       (road): road is Road => road instanceof Road,
     );
 
-    let changed =
-      validRoads.length !== this.roads.length;
+    let changed = validRoads.length !== this.roads.length;
 
     if (!changed) {
-      for (
-        let index = 0;
-        index < validRoads.length;
-        index++
-      ) {
-        if (
-          validRoads[index] !==
-          this.roads[index]
-        ) {
+      for (let index = 0; index < validRoads.length; index++) {
+        if (validRoads[index] !== this.roads[index]) {
           changed = true;
           break;
         }
@@ -467,11 +692,16 @@ export default class CarManager {
 
     this.roads.push(...validRoads);
 
-    if (
-      this.initialized &&
-      !this.initialCarsSpawned &&
-      this.roads.length > 0
-    ) {
+    /**
+     * اگر World شبکه Road را بازسازی کرده باشد، هیچ Active Vehicle نباید
+     * روی Road حذف‌شده باقی بماند. در صورت نیاز آن را روی یک نقطه امن از
+     * شبکه جدید Reposition می‌کنیم؛ Count و Lifecycle حفظ می‌شود.
+     */
+    if (this.roads.length > 0 && this.activeVehicles.length > 0) {
+      this.reconcileActiveVehiclesWithRoadNetwork();
+    }
+
+    if (this.initialized && !this.initialCarsSpawned && this.roads.length > 0) {
       this.spawnInitialCars();
     }
 
@@ -483,37 +713,82 @@ export default class CarManager {
   }
 
   /**
-   * ==========================================
-   * Update
-   * ==========================================
-   */
+
+==========================================
+
+Reconcile Active Vehicles With Road Network
+
+==========================================
+*/
+
+  private reconcileActiveVehiclesWithRoadNetwork(): void {
+    for (const active of this.activeVehicles) {
+      if (this.roads.includes(active.road)) {
+        if (
+          active.trafficTransition &&
+          !this.roads.includes(active.trafficTransition.toRoad)
+        ) {
+          active.trafficTransition = null;
+          active.targetSpeed = active.cruiseSpeed;
+          active.intersectionWaitTime = 0;
+          active.waitingAtIntersection = false;
+          active.intersectionReleaseTime = 0;
+        }
+
+        continue;
+      }
+
+      const candidate = this.findRecycleCandidateWithoutCamera(active);
+
+      if (!candidate) {
+        /**
+         * اگر شبکه در همان لحظه هیچ نقطه امنی نداشت، خودرو را حذف نمی‌کنیم.
+         * Frameهای بعدی دوباره این وضعیت را بررسی خواهند کرد.
+         */
+        active.targetSpeed = 0;
+        active.motionSpeed = 0;
+        active.trafficTransition = null;
+        continue;
+      }
+
+      this.applyRecycleCandidate(active, candidate);
+    }
+  }
+
+  /**
+
+==========================================
+
+Update
+
+==========================================
+*/
 
   public update(
     cameraPosition: THREE.Vector3,
     deltaTime: number,
     camera?: THREE.Camera,
   ): void {
-    // موقعیت دوربین را فقط یک‌بار در هر Frame ذخیره می‌کنیم تا Spawn مجدد
-    // بتواند خودرو را خارج از محدوده دید مستقیم قرار دهد.
+    const safeDeltaTime = THREE.MathUtils.clamp(
+      Number.isFinite(deltaTime) ? deltaTime : 0,
+      0,
+      0.1,
+    );
+
     this.lastCameraPosition.copy(cameraPosition);
+
     this.hasCameraPosition = true;
 
-    // Camera واقعی را نگه می‌داریم تا Spawn/Reposition فقط بر اساس فاصله نباشد؛
-    // نقطه باید واقعاً خارج از Frustum دوربین هم باشد.
     if (camera) {
       this.camera = camera;
-      // ماتریس دوربین قبل از Project کردن نقاط Spawn به‌روز می‌شود.
-      // این کار باعث می‌شود Frustum دقیقاً با نمای همان Frame هماهنگ باشد.
       this.camera.updateMatrixWorld();
     }
+
     if (!this.initialized) {
       return;
     }
 
-    if (
-      !this.initialCarsSpawned &&
-      this.roads.length > 0
-    ) {
+    if (!this.initialCarsSpawned && this.roads.length > 0) {
       this.spawnInitialCars();
     }
 
@@ -521,180 +796,410 @@ export default class CarManager {
       return;
     }
 
+    for (const active of this.activeVehicles) {
+      active.intersectionReleaseTime = Math.max(
+        0,
+        active.intersectionReleaseTime - safeDeltaTime,
+      );
+    }
+
     /**
      * ========================================
      * Continuous Traffic
      * ========================================
-     *
-     * فقط خودروهای اولیه یا جای خالی واقعی Pool را تکمیل می‌کنیم.
-     * Recycle عادی دیگر از Pool استفاده نمی‌کند.
      */
-    this.refillTimer += Math.max(0, deltaTime);
 
-    // Pending Recycle هر Frame بررسی می‌شود تا انتقال به مقصد امن
-    // با کمترین تأخیر ممکن انجام شود. این بخش فقط زمانی کار می‌کند
-    // که واقعاً خودروی pending وجود داشته باشد.
+    this.refillTimer += Math.max(0, safeDeltaTime);
+
     this.processPendingRecycles();
 
-    if (
-      this.refillTimer >=
-      CarManager.REFILL_INTERVAL
-    ) {
+    if (this.refillTimer >= CarManager.REFILL_INTERVAL) {
       this.refillTimer = 0;
 
       this.refillTraffic();
     }
 
     /**
-     * ابتدا وضعیت تمام خودروها مشخص می‌شود.
+     * ابتدا وضعیت Traffic تمام خودروها مشخص می‌شود.
      */
-    this.updateTrafficState(deltaTime);
+    this.updateTrafficState(safeDeltaTime);
 
     /**
-     * سپس حرکت خودروها انجام می‌شود.
+     * سرعت همهٔ خودروهای عادی پیش از محاسبهٔ موقعیت‌ها به‌روز می‌شود.
+     * سپس Snapshot مشترک ابتدای فریم ثبت می‌شود تا Collision Guard
+     * برای خودروهای مختلف از موقعیت‌های یکسان و قابل‌مقایسه استفاده کند.
      */
-    for (
-      let index =
-        this.activeVehicles.length - 1;
-      index >= 0;
-      index--
-    ) {
-      const active =
-        this.activeVehicles[index];
+    for (const active of this.activeVehicles) {
+      // Transition هم باید سرعت واقعی را با شتاب مجاز تغییر دهد؛
+      // مسیر پیچ دیگر با زمان ثابت خودرو را ناگهان تند یا کند نمی‌کند.
+      this.updateSmoothMotionSpeed(active, safeDeltaTime);
+
+      active.frameStartPosition.copy(active.vehicle.group.position);
+      active.frameStartMotionSpeed = active.motionSpeed;
+      active.frameStartDirection = active.vehicle.getDirection();
+      active.frameStartTrafficTransition = active.trafficTransition;
+    }
+
+    /**
+     * سپس موقعیت واقعی خودروها محاسبه می‌شود.
+     */
+    for (let index = this.activeVehicles.length - 1; index >= 0; index--) {
+      const active = this.activeVehicles[index];
 
       if (!active) {
         continue;
       }
 
       /**
-       * خودرو در حال Transition است.
+       * ======================================
+       * Transition
+       * ======================================
        */
+
       if (active.trafficTransition) {
-        this.updateTransition(
-          active,
-          deltaTime,
-        );
+        this.updateTransition(active, safeDeltaTime);
 
         continue;
       }
 
       /**
        * ======================================
-       * حرکت عادی خودرو
+       * Normal Road Motion
        * ======================================
-       *
-       * حرکت مستقیم اینجا انجام می‌شود تا منطق
-       * Traffic Manager هیچ‌وقت به‌خاطر Collision
-       * Guard خودروها را در یک نقطه قفل نکند.
-       *
-       * جهت‌ها همان mapping فعلی هستند و تغییر
-       * نمی‌کنند؛ فقط position خودرو با سرعت فعلی
-       * روی محور جهانی جلو می‌رود.
        */
+
       this.setDirectionVector(
         active.vehicle.getDirection(),
         this.tempDirection,
       );
 
-      /**
-       * سرعت را با شتاب/ترمز نرم به Target نزدیک می‌کنیم.
-       *
-       * نکته مهم:
-       * حرکت Transform دیگر مستقیماً از getSpeed() داخلی Vehicle
-       * استفاده نمی‌کند؛ بنابراین stop()/resume() داخلی نمی‌تواند
-       * باعث پرش یا قطع و وصل موقعیت خودرو شود.
-       */
-      this.updateSmoothMotionSpeed(
-        active,
-        deltaTime,
-      );
-
       const speed = active.motionSpeed;
 
       if (speed > 0.001) {
-        active.vehicle.group.position.addScaledVector(
-          this.tempDirection,
-          speed * Math.max(0, deltaTime),
-        );
+        const movementDistance = speed * Math.max(0, safeDeltaTime);
 
-        active.vehicle.group.position.y =
-          CarManager.VEHICLE_Y;
+        this.tempPredictedPosition
+          .copy(active.vehicle.group.position)
+          .addScaledVector(this.tempDirection, movementDistance);
+
+        /**
+         * ======================================
+         * Physical Vehicle Collision Guard
+         * ======================================
+         *
+         * قبل از ثبت موقعیت جدید، بررسی می‌کنیم که خودرو وارد محدوده
+         * برخورد خودروی دیگری نشود. حق‌تقدم تقاطع همچنان رعایت می‌شود.
+         * اگر مسیر حرکت باعث برخورد قطعی شود، ترمز اضطراری اعمال می‌شود؛
+         * به محض آزادشدن مسیر، خودرو در فریم‌های بعدی دوباره حرکت می‌کند.
+         */
+        let safeMovementFraction = 1;
+        const currentPosition = active.frameStartPosition;
+        const collisionMargin = 0.08;
+        const minimumSafeDistance =
+          CarManager.VEHICLE_COLLISION_DISTANCE + collisionMargin;
+
+        for (const other of this.activeVehicles) {
+          if (other === active) {
+            continue;
+          }
+
+          // اگر Transition دقیقاً در همین فریم تمام شده باشد، stateهای قدیم و جدید
+          // با هم مخلوط نمی‌کنیم؛ Collision Guard اصلی فریم بعدی آن را بررسی می‌کند.
+          if (other.frameStartTrafficTransition !== other.trafficTransition) {
+            continue;
+          }
+
+          if (this.shouldIgnoreRedApproachForGreenTraffic(active, other)) {
+            continue;
+          }
+
+          // خودروهای عادی در دو لاین جدا از یک Road، حتی با جهت مخالف،
+          // نباید وارد Collision Guard فیزیکی یکدیگر شوند.
+          // در غیر این صورت فاصلهٔ جانبی لاین‌ها به‌اشتباه برخورد محسوب می‌شود.
+          if (
+            active.road === other.road &&
+            active.laneIndex !== other.laneIndex &&
+            !active.frameStartTrafficTransition &&
+            !other.frameStartTrafficTransition
+          ) {
+            continue;
+          }
+
+          if (!this.shouldCheckRoadCollisionPair(active, other)) {
+            continue;
+          }
+
+          const otherPosition = other.frameStartPosition;
+          this.tempOtherPredictedPosition.copy(otherPosition);
+
+          if (
+            !other.frameStartTrafficTransition &&
+            other.frameStartMotionSpeed > 0.001
+          ) {
+            this.setDirectionVector(
+              other.frameStartDirection,
+              this.tempOtherDirection,
+            );
+            this.tempOtherPredictedPosition.addScaledVector(
+              this.tempOtherDirection,
+              other.frameStartMotionSpeed *
+                Math.min(safeDeltaTime, CarManager.VEHICLE_PREDICTION_TIME),
+            );
+          }
+
+          const currentDistance = currentPosition.distanceTo(otherPosition);
+          this.tempPredictedPosition
+            .copy(currentPosition)
+            .addScaledVector(this.tempDirection, movementDistance);
+          const proposedDistance = this.tempPredictedPosition.distanceTo(
+            this.tempOtherPredictedPosition,
+          );
+
+          // اگر خودرو در حال دورشدن از خودروی دیگر است، حتی اگر فاصله فعلی
+          // کمی کمتر از حاشیه ایمنی باشد، نباید حرکت امن آن را محدود کنیم.
+          if (
+            proposedDistance >= minimumSafeDistance ||
+            proposedDistance + 0.015 >= currentDistance
+          ) {
+            continue;
+          }
+
+          // به‌جای قفل‌کردن کامل موقعیت خودرو، حداکثر مسافت امن همین فریم را پیدا می‌کنیم.
+          let low = 0;
+          let high = safeMovementFraction;
+
+          for (let iteration = 0; iteration < 8; iteration++) {
+            const middle = (low + high) * 0.5;
+            this.tempPredictedPosition
+              .copy(currentPosition)
+              .addScaledVector(this.tempDirection, movementDistance * middle);
+
+            const distanceAtMiddle = this.tempPredictedPosition.distanceTo(
+              this.tempOtherPredictedPosition,
+            );
+
+            if (distanceAtMiddle >= minimumSafeDistance) {
+              low = middle;
+            } else {
+              high = middle;
+            }
+          }
+
+          safeMovementFraction = Math.min(safeMovementFraction, low);
+        }
+
+        // جابه‌جایی مجاز را یک بار محاسبه می‌کنیم تا سرعت داخلی با حرکت واقعی
+        // هماهنگ بماند. در نسخه قبلی موقعیت محدود می‌شد ولی motionSpeed بالا می‌ماند؛
+        // خودرو سپس چند فریم می‌ایستاد و با همان سرعت قبلی دوباره حرکت می‌کرد.
+        const actualMovementDistance = movementDistance * safeMovementFraction;
+
+        this.tempPredictedPosition
+          .copy(currentPosition)
+          .addScaledVector(this.tempDirection, actualMovementDistance);
+
+        active.vehicle.group.position.copy(this.tempPredictedPosition);
+        active.vehicle.group.position.y = CarManager.VEHICLE_Y;
+
+        // فقط وقتی محافظ برخورد واقعاً حرکت را محدود کرده است، سرعت با سرعت جابه‌جایی
+        // همین فریم هماهنگ می‌شود. ترمز پیش‌بینانه باید باعث شود این مسیر اضطراری نادر باشد.
+        if (safeMovementFraction < 0.999 && safeDeltaTime > 0.0001) {
+          const realizedSpeed = Math.max(
+            0,
+            actualMovementDistance / safeDeltaTime,
+          );
+
+          active.motionSpeed = Math.min(active.motionSpeed, realizedSpeed);
+          active.targetSpeed = Math.min(active.targetSpeed, active.motionSpeed);
+        }
       }
 
       /**
-       * Target داخلی Vehicle نیز با سرعت نرم‌شده هماهنگ می‌شود
-       * تا Animation/مدل خودرو با حرکت World از ریتم خارج نشود.
+       * اگر خودرو در حال انتظار برای عبور از تقاطع است،
+       * موقعیت آن را دقیقاً روی خط توقف نگه می‌داریم.
+       *
+       * این فقط زمانی فعال می‌شود که خودرو واقعاً در حالت
+       * waitingAtIntersection باشد و به خط توقف رسیده باشد.
        */
-      active.vehicle.setTargetSpeed(
-        active.motionSpeed,
-      );
+      if (active.waitingAtIntersection) {
+        this.clampVehicleToIntersectionStopLine(active);
+      }
 
       /**
-       * بعد از حرکت موقعیت Road به‌روزرسانی
-       * می‌شود.
+       * Animation داخلی Vehicle نیز با سرعت واقعی هماهنگ می‌شود.
        */
-      this.updateRoadProgress(active);
+      active.vehicle.setTargetSpeed(active.motionSpeed);
+    }
+
+    /**
+     * Road progress / recycling تغییر state ایجاد می‌کند، بنابراین پس از اینکه
+     * تمام خودروها موقعیت خود را حساب کردند اجرا می‌شود؛ در غیر این صورت guard
+     * خودروهای بعدی داده‌های مربوط به فریم دیگری را می‌دید.
+     */
+    for (let index = this.activeVehicles.length - 1; index >= 0; index--) {
+      const active = this.activeVehicles[index];
+      if (!active) continue;
+
+      // خودروهایی که در ابتدای همین فریم Transition داشتند، مثل قبل
+      // فقط Transition خود را به‌روزرسانی می‌کنند و Road progress را تکرار نمی‌کنند.
+      if (!active.frameStartTrafficTransition) {
+        this.updateRoadProgress(active);
+      }
+
+      this.updateVehicleProgressWatchdog(active, safeDeltaTime);
+      this.updateVehicleDistanceFade(active.vehicle);
     }
   }
 
   /**
-   * ==========================================
-   * Smooth Motion Speed
-   * ==========================================
-   *
-   * سرعت World را به‌صورت exponential smoothing به Target نزدیک می‌کند.
-   * این باعث می‌شود تغییرات FPS یا تغییر ناگهانی وضعیت Traffic باعث
-   * پرش مکانی خودرو نشود.
-   */
+
+==========================================
+
+Vehicle Camera Frustum Fade
+
+==========================================
+
+Fade فقط وقتی شروع می‌شود که خودرو واقعاً از محدوده دید Camera
+خارج شده باشد؛ فاصله از Camera به‌تنهایی هیچ نقشی ندارد.
+خودرو هرگز به‌خاطر این Fade حذف یا Recycle نمی‌شود.
+*/
+  private updateVehicleDistanceFade(vehicle: Vehicle): void {
+    /**
+     * Fade نباید بر اساس فاصله از Camera باشد.
+     * تا وقتی خودرو داخل محدوده واقعی تصویر است، opacity دقیقاً 1 است.
+     */
+    if (!this.camera) {
+      return;
+    }
+
+    this.camera.updateMatrixWorld();
+
+    this.tempProjectedPosition
+      .copy(vehicle.group.position)
+      .project(this.camera);
+
+    const ndc = this.tempProjectedPosition;
+
+    /**
+     * فاصله خودرو از مرز محدوده دید در فضای NDC.
+     * مقدار صفر یعنی داخل تصویر یا دقیقاً روی لبه تصویر هستیم.
+     */
+    const outsideX = Math.max(0, Math.abs(ndc.x) - 1);
+
+    const outsideY = Math.max(0, Math.abs(ndc.y) - 1);
+
+    const outsideZ = ndc.z < -1 ? -1 - ndc.z : ndc.z > 1 ? ndc.z - 1 : 0;
+
+    const outsideAmount = Math.max(outsideX, outsideY, outsideZ);
+
+    let opacity = 1;
+
+    if (outsideAmount > 0) {
+      const t = THREE.MathUtils.clamp(
+        outsideAmount / Math.max(CarManager.VEHICLE_FADE_NDC_RANGE, 0.001),
+        0,
+        1,
+      );
+
+      opacity = THREE.MathUtils.lerp(1, CarManager.VEHICLE_FADE_MIN_OPACITY, t);
+    }
+
+    let materials = this.vehicleFadeMaterials.get(vehicle);
+
+    if (!materials) {
+      materials = [];
+
+      vehicle.group.traverse((object) => {
+        if (!(object instanceof THREE.Mesh)) {
+          return;
+        }
+
+        const source = object.material;
+
+        if (Array.isArray(source)) {
+          const cloned = source.map((material) => material.clone());
+
+          object.material = cloned;
+          materials!.push(...cloned);
+        } else {
+          const cloned = source.clone();
+
+          object.material = cloned;
+          materials!.push(cloned);
+        }
+      });
+
+      this.vehicleFadeMaterials.set(vehicle, materials);
+    }
+
+    for (const material of materials) {
+      material.transparent = true;
+      material.opacity = opacity;
+      material.needsUpdate = true;
+    }
+  }
+
+  /**
+
+==========================================
+
+Smooth Motion Speed
+
+==========================================
+*/
+
   private updateSmoothMotionSpeed(
     active: ActiveVehicleData,
     deltaTime: number,
   ): void {
-    const dt = Math.min(
-      Math.max(deltaTime, 0),
-      0.05,
-    );
-
-    const current = active.motionSpeed;
-    const target = Math.max(
+    const dt = THREE.MathUtils.clamp(
+      Number.isFinite(deltaTime) ? deltaTime : 0,
       0,
-      active.targetSpeed,
+      0.1,
     );
 
-    if (Math.abs(target - current) < 0.01) {
+    if (dt <= 0) {
+      return;
+    }
+
+    const current = Math.max(0, active.motionSpeed);
+    const target = THREE.MathUtils.clamp(
+      active.targetSpeed,
+      0,
+      CarManager.MAX_SPEED,
+    );
+    const difference = target - current;
+
+    if (Math.abs(difference) < 0.01) {
       active.motionSpeed = target;
       return;
     }
 
+    // حرکت با شتاب محدود انجام می‌شود؛ تغییر targetSpeed در یک فریم،
+    // سرعت واقعی خودرو را مستقیم تغییر نمی‌دهد.
     const rate =
-      target > current
-        ? CarManager.ACCELERATION
-        : CarManager.DECELERATION;
+      difference > 0 ? CarManager.ACCELERATION : CarManager.DECELERATION;
 
-    const alpha =
-      1 - Math.exp(-rate * dt);
+    const maxSpeedChange = rate * dt;
+    const speedChange = THREE.MathUtils.clamp(
+      difference,
+      -maxSpeedChange,
+      maxSpeedChange,
+    );
 
-    active.motionSpeed =
-      THREE.MathUtils.lerp(
-        current,
-        target,
-        alpha,
-      );
+    active.motionSpeed = Math.max(0, current + speedChange);
   }
 
   /**
-   * ==========================================
-   * Continuous Traffic Refill
-   * ==========================================
-   *
-   * تعداد خودروهای فعال را تا TARGET_ACTIVE_CARS
-   * نگه می‌دارد.
-   */
+
+==========================================
+
+Continuous Traffic Refill
+
+==========================================
+*/
+
   private refillTraffic(): void {
-    if (
-      this.roads.length === 0 ||
-      this.availableVehicles.length === 0
-    ) {
+    if (this.roads.length === 0 || this.availableVehicles.length === 0) {
       return;
     }
 
@@ -703,9 +1208,7 @@ export default class CarManager {
       CarManager.POOL_SIZE,
     );
 
-    const missing =
-      targetCount -
-      this.activeVehicles.length;
+    const missing = targetCount - this.activeVehicles.length;
 
     if (missing <= 0) {
       return;
@@ -713,23 +1216,17 @@ export default class CarManager {
 
     let attempts = 0;
 
-    const maxAttempts = Math.max(
-      20,
-      missing * 8,
-    );
+    const maxAttempts = Math.max(20, missing * 8);
 
     while (
-      this.activeVehicles.length <
-        targetCount &&
+      this.activeVehicles.length < targetCount &&
       this.availableVehicles.length > 0 &&
       attempts < maxAttempts
     ) {
       attempts++;
 
-      this.spawnCar(
-        this.hasCameraPosition ? this.lastCameraPosition : undefined,
-        this.hasCameraPosition,
-      );
+      // Spawn مستقل از Camera انجام می‌شود؛ Camera فقط برای Recycle استفاده می‌شود.
+      this.spawnCar();
     }
 
     if (this.activeVehicles.length > 0) {
@@ -738,10 +1235,13 @@ export default class CarManager {
   }
 
   /**
-   * ==========================================
-   * Initial Cars
-   * ==========================================
-   */
+
+==========================================
+
+Initial Cars
+
+==========================================
+*/
 
   private spawnInitialCars(): void {
     if (
@@ -752,16 +1252,6 @@ export default class CarManager {
       return;
     }
 
-    /**
-     * Spawn اولیه عمداً به Camera وابسته نیست.
-     *
-     * نسخه قبلی برای اولین خودروها هم از Frustum/Off-screen Candidate
-     * استفاده می‌کرد. در شهر Chunk-based ممکن بود هیچ Candidateای پیدا نشود
-     * و در نتیجه Pool ساخته شود ولی حتی یک خودرو فعال نشود.
-     *
-     * اینجا ابتدا خودروها را روی Roadهای واقعی و با فاصله امن از یکدیگر
-     * ایجاد می‌کنیم. منطق Off-screen فقط برای Recycle بعدی استفاده می‌شود.
-     */
     const targetCount = Math.min(
       CarManager.INITIAL_CARS,
       this.availableVehicles.length,
@@ -769,10 +1259,8 @@ export default class CarManager {
 
     let spawned = 0;
     let attempts = 0;
-    const maxAttempts = Math.max(
-      targetCount * 80,
-      160,
-    );
+
+    const maxAttempts = Math.max(targetCount * 80, 160);
 
     while (
       spawned < targetCount &&
@@ -786,39 +1274,26 @@ export default class CarManager {
       }
     }
 
-    /**
-     * حتی اگر به دلیل تراکم Roadها کمتر از هدف Spawn شد،
-     * همان خودروهای فعال را معتبر می‌دانیم. Refill در Frameهای بعدی
-     * باقی‌مانده Pool را به‌تدریج تکمیل می‌کند.
-     */
     if (spawned > 0) {
       this.initialCarsSpawned = true;
     }
   }
 
   /**
-   * ==========================================
-   * Initial Spawn Car
-   * ==========================================
-   *
-   * Spawn اولیه ساده و قابل اتکاست:
-   * - فقط Road و Lane واقعی
-   * - فاصله امن از خودروهای فعال
-   * - بدون وابستگی به Camera Frustum
-   *
-   * این تابع فقط برای شروع Traffic است و Recycle را کنترل نمی‌کند.
-   */
+
+==========================================
+
+Initial Spawn Car
+
+==========================================
+*/
+
   private spawnInitialCar(): boolean {
-    if (
-      this.availableVehicles.length === 0 ||
-      this.roads.length === 0
-    ) {
+    if (this.availableVehicles.length === 0 || this.roads.length === 0) {
       return false;
     }
 
-    const roadIndex = Math.floor(
-      Math.random() * this.roads.length,
-    );
+    const roadIndex = Math.floor(Math.random() * this.roads.length);
 
     const road = this.roads[roadIndex];
 
@@ -826,105 +1301,37 @@ export default class CarManager {
       return false;
     }
 
-    const laneIndex = Math.floor(
-      Math.random() * Road.LANE_COUNT,
-    );
+    const laneIndex = Math.floor(Math.random() * Road.LANE_COUNT);
 
-    const direction =
-      this.getDirectionForRoad(
-        road,
-        laneIndex,
-      );
+    const direction = this.getDirectionForRoad(road, laneIndex);
 
-    const roadDistance =
-      this.getRandomSpawnDistance(road);
+    const roadDistance = this.getRandomSpawnDistance(road);
 
-    if (
-      !this.canSpawnCar(
-        road,
-        laneIndex,
-        direction,
-        roadDistance,
-      )
-    ) {
+    if (!this.canSpawnCar(road, laneIndex, direction, roadDistance)) {
       return false;
     }
 
-    return this.activateVehicleAt(
-      road,
-      laneIndex,
-      direction,
-      roadDistance,
-    );
+    return this.activateVehicleAt(road, laneIndex, direction, roadDistance);
   }
 
   /**
-   * ==========================================
-   * Spawn Car
-   * ==========================================
-   */
 
-  private spawnCar(
-    cameraPosition?: THREE.Vector3,
-    preferOffscreenSpawn = false,
-  ): boolean {
-    if (
-      this.availableVehicles.length === 0 ||
-      this.roads.length === 0
-    ) {
+==========================================
+
+Spawn Car
+
+==========================================
+*/
+
+  private spawnCar(): boolean {
+    if (this.availableVehicles.length === 0 || this.roads.length === 0) {
       return false;
     }
 
-    /**
-     * Refill عادی ابتدا مقصد Off-screen را امتحان می‌کند.
-     * اگر در شبکه فعلی هیچ Candidate امنی پیدا نشد، Traffic نباید متوقف شود؛
-     * بنابراین به Spawn معمولی روی Road برمی‌گردیم.
-     *
-     * این fallback فقط برای جلوگیری از خالی شدن Traffic Pool است و
-     * به Road، Lane یا جهت حرکت دست نمی‌زند.
-     */
-    if (
-      cameraPosition &&
-      preferOffscreenSpawn
-    ) {
-      const candidate =
-        this.findOffscreenRecycleCandidate(
-          cameraPosition,
-          undefined,
-        );
+    const maxAttempts = Math.min(24, Math.max(8, this.roads.length * 2));
 
-      if (candidate) {
-        return this.activateVehicleAt(
-          candidate.road,
-          candidate.laneIndex,
-          candidate.direction,
-          candidate.distance,
-        );
-      }
-    }
-
-    /**
-     * Fallback / Spawn معمولی.
-     *
-     * این مسیر عمداً مستقل از Camera است تا اگر Frustum یا Chunkهای فعال
-     * Candidate مناسبی ندادند، خودروها همچنان ساخته شوند.
-     */
-    const maxAttempts = Math.min(
-      24,
-      Math.max(
-        8,
-        this.roads.length * 2,
-      ),
-    );
-
-    for (
-      let attempt = 0;
-      attempt < maxAttempts;
-      attempt++
-    ) {
-      const roadIndex = Math.floor(
-        Math.random() * this.roads.length,
-      );
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const roadIndex = Math.floor(Math.random() * this.roads.length);
 
       const road = this.roads[roadIndex];
 
@@ -932,38 +1339,17 @@ export default class CarManager {
         continue;
       }
 
-      const laneIndex = Math.floor(
-        Math.random() * Road.LANE_COUNT,
-      );
+      const laneIndex = Math.floor(Math.random() * Road.LANE_COUNT);
 
-      const direction =
-        this.getDirectionForRoad(
-          road,
-          laneIndex,
-        );
+      const direction = this.getDirectionForRoad(road, laneIndex);
 
-      const roadDistance =
-        this.getRandomSpawnDistance(road);
+      const roadDistance = this.getRandomSpawnDistance(road);
 
-      if (
-        !this.canSpawnCar(
-          road,
-          laneIndex,
-          direction,
-          roadDistance,
-        )
-      ) {
+      if (!this.canSpawnCar(road, laneIndex, direction, roadDistance)) {
         continue;
       }
 
-      if (
-        this.activateVehicleAt(
-          road,
-          laneIndex,
-          direction,
-          roadDistance,
-        )
-      ) {
+      if (this.activateVehicleAt(road, laneIndex, direction, roadDistance)) {
         return true;
       }
     }
@@ -972,45 +1358,39 @@ export default class CarManager {
   }
 
   /**
-   * ==========================================
-   * Activate Vehicle At
-   * ==========================================
-   *
-   * تنها نقطه‌ای که Vehicle تازه از Pool خارج می‌شود.
-   *
-   * مهم: Recycle فعال‌ها از این تابع استفاده نمی‌کند؛
-   * Recycle فقط Transform خودرو فعال را جابه‌جا می‌کند.
-   */
+
+==========================================
+
+Activate Vehicle At
+
+==========================================
+*/
+
   private activateVehicleAt(
     road: Road,
     laneIndex: number,
     direction: VehicleDirection,
     roadDistance: number,
   ): boolean {
-    const vehicle =
-      this.availableVehicles.pop();
+    const vehicle = this.availableVehicles.pop();
 
     if (!vehicle) {
       return false;
     }
 
-    const position =
-      this.getVehicleWorldPosition(
-        road,
-        laneIndex,
-        roadDistance,
-      );
-
-    const cruiseSpeed =
-      this.getRandomSpeed();
-
-    vehicle.activate(
-      position,
-      direction,
-      cruiseSpeed,
+    const position = this.getVehicleWorldPosition(
+      road,
+      laneIndex,
+      roadDistance,
     );
 
+    const cruiseSpeed = this.getRandomSpeed();
+
+    vehicle.activate(position, direction, cruiseSpeed);
+
     vehicle.group.visible = true;
+
+    this.updateVehicleDistanceFade(vehicle);
 
     this.activeVehicles.push({
       vehicle,
@@ -1023,108 +1403,123 @@ export default class CarManager {
       targetSpeed: cruiseSpeed,
       intersectionWaitTime: 0,
       waitingAtIntersection: false,
+      intersectionReleaseTime: 0,
+      lastProgressPosition: position.clone(),
+      frameStartPosition: position.clone(),
+      frameStartMotionSpeed: cruiseSpeed,
+      frameStartDirection: direction,
+      frameStartTrafficTransition: null,
+      stalledTime: 0,
     });
 
     return true;
   }
 
   /**
-   * ==========================================
-   * Random Spawn Distance
-   * ==========================================
-   */
 
-  /**
-   * ==========================================
-   * Offscreen Recycle Spawn Distance
-   * ==========================================
-   *
-   * برای خودروهایی که به انتهای Road رسیده‌اند، نقطه Spawn را از بین
-   * دو سر Road انتخاب می‌کنیم؛ فقط نقطه‌ای پذیرفته می‌شود که از دوربین
-   * به اندازه کافی دور باشد.
-   *
-   * این منطق فقط برای Recycle است و منطق حرکت خودروها را تغییر نمی‌دهد.
-   */
-  private getRandomSpawnDistance(
-    road: Road,
-  ): number {
-    const min =
-      road.getLongitudinalMin() +
-      CarManager.TRANSITION_EXIT_DISTANCE;
+==========================================
 
-    const max =
-      road.getLongitudinalMax() -
-      CarManager.TRANSITION_EXIT_DISTANCE;
+Random Spawn Distance
 
-    if (max <= min) {
-      return (
-        road.getLongitudinalMin() +
-        road.getLongitudinalMax()
-      ) / 2;
+==========================================
+*/
+
+  private getRandomSpawnDistance(road: Road): number {
+    const min = road.getLongitudinalMin() + CarManager.TRANSITION_EXIT_DISTANCE;
+    const max = road.getLongitudinalMax() - CarManager.TRANSITION_EXIT_DISTANCE;
+    const safeCenterGap =
+      CarManager.INTERSECTION_STOP_DISTANCE_FROM_CENTER + 1.25;
+
+    const negativeEnd = Math.min(max, -safeCenterGap);
+    const positiveStart = Math.max(min, safeCenterGap);
+    const negativeLength = Math.max(0, negativeEnd - min);
+    const positiveLength = Math.max(0, max - positiveStart);
+    const totalLength = negativeLength + positiveLength;
+
+    if (totalLength <= 0) {
+      return (min + max) / 2;
     }
 
-    return (
-      min +
-      Math.random() * (max - min)
-    );
+    const value = Math.random() * totalLength;
+    if (value < negativeLength) {
+      return min + value;
+    }
+
+    return positiveStart + (value - negativeLength);
   }
 
   /**
-   * ==========================================
-   * Vehicle World Position
-   * ==========================================
-   *
-   * Lane 0:
-   * -2 -> -1.5
-   *
-   * Lane 1:
-   * +2 -> +1.5
-   *
-   * این بخش حفظ شده است.
+   * Safe spawn/recycle points are sampled only on the two outer road sections.
+   * No pooled car is placed directly inside the central intersection.
    */
+  private getSafeRoadDistances(road: Road): number[] {
+    const min = road.getLongitudinalMin() + CarManager.TRANSITION_EXIT_DISTANCE;
+    const max = road.getLongitudinalMax() - CarManager.TRANSITION_EXIT_DISTANCE;
+    const centerGap = CarManager.INTERSECTION_STOP_DISTANCE_FROM_CENTER + 1.25;
+    const samplesPerSide = Math.max(
+      3,
+      Math.ceil(CarManager.SPAWN_POSITION_SAMPLES / 2),
+    );
+    const distances: number[] = [];
+
+    const addSegment = (start: number, end: number): void => {
+      if (end < start) {
+        return;
+      }
+
+      for (let i = 0; i < samplesPerSide; i++) {
+        const t = i / (samplesPerSide - 1);
+        distances.push(THREE.MathUtils.lerp(start, end, t));
+      }
+    };
+
+    addSegment(min, Math.min(max, -centerGap));
+    addSegment(Math.max(min, centerGap), max);
+
+    return distances;
+  }
+
+  /**
+
+==========================================
+
+Vehicle World Position
+
+==========================================
+*/
 
   private getVehicleWorldPosition(
     road: Road,
     laneIndex: number,
     roadDistance: number,
   ): THREE.Vector3 {
-    const lanePosition =
-      road.getLanePosition(
-        laneIndex,
-        roadDistance,
-      );
+    const lanePosition = road.getLanePosition(laneIndex, roadDistance);
 
-    this.tempLocalPosition.copy(
-      lanePosition,
-    );
+    this.tempLocalPosition.copy(lanePosition);
 
     if (laneIndex === 0) {
-      this.tempLocalPosition.x +=
-        CarManager.TRAFFIC_LANE_SAFETY_OFFSET;
+      this.tempLocalPosition.x += CarManager.TRAFFIC_LANE_SAFETY_OFFSET;
     } else if (laneIndex === 1) {
-      this.tempLocalPosition.x -=
-        CarManager.TRAFFIC_LANE_SAFETY_OFFSET;
+      this.tempLocalPosition.x -= CarManager.TRAFFIC_LANE_SAFETY_OFFSET;
     }
 
-    this.tempWorldPosition.copy(
-      this.tempLocalPosition,
-    );
+    this.tempWorldPosition.copy(this.tempLocalPosition);
 
-    road.group.localToWorld(
-      this.tempWorldPosition,
-    );
+    road.group.localToWorld(this.tempWorldPosition);
 
-    this.tempWorldPosition.y =
-      CarManager.VEHICLE_Y;
+    this.tempWorldPosition.y = CarManager.VEHICLE_Y;
 
     return this.tempWorldPosition;
   }
 
   /**
-   * ==========================================
-   * Spawn Validation
-   * ==========================================
-   */
+
+==========================================
+
+Spawn Validation
+
+==========================================
+*/
 
   private canSpawnCar(
     road: Road,
@@ -1134,70 +1529,45 @@ export default class CarManager {
     ignoredVehicle?: ActiveVehicleData,
   ): boolean {
     for (const active of this.activeVehicles) {
-      // هنگام Recycle همان Vehicle دوباره استفاده می‌شود؛ خودش نباید
-      // به‌عنوان مانع مقصد جدید خودش محاسبه شود.
       if (active === ignoredVehicle) {
         continue;
       }
-      /**
-       * خودروهای همان Lane.
-       */
-      if (
-        active.road === road &&
-        active.laneIndex === laneIndex
-      ) {
-        const distance =
-          this.getForwardDistance(
-            road,
-            roadDistance,
-            active.roadDistance,
-            direction,
-          );
 
-        if (
-          distance >= 0 &&
-          distance <
-            CarManager.MIN_SPAWN_DISTANCE
-        ) {
+      if (active.road === road && active.laneIndex === laneIndex) {
+        const distance = this.getForwardDistance(
+          road,
+          roadDistance,
+          active.roadDistance,
+          direction,
+        );
+
+        if (distance >= 0 && distance < CarManager.MIN_SPAWN_DISTANCE) {
           return false;
         }
 
         if (
-          Math.abs(
-            roadDistance -
-              active.roadDistance,
-          ) <
-            CarManager.MIN_SPAWN_DISTANCE
+          Math.abs(roadDistance - active.roadDistance) <
+          CarManager.MIN_SPAWN_DISTANCE
         ) {
           return false;
         }
       }
 
-      /**
-       * مقصد Transition.
-       */
-      const transition =
-        active.trafficTransition;
+      const transition = active.trafficTransition;
 
       if (
         transition &&
         transition.toRoad === road &&
-        transition.toLaneIndex ===
-          laneIndex
+        transition.toLaneIndex === laneIndex
       ) {
-        const distance =
-          this.getForwardDistance(
-            road,
-            roadDistance,
-            transition.finalDistance,
-            direction,
-          );
+        const distance = this.getForwardDistance(
+          road,
+          roadDistance,
+          transition.finalDistance,
+          direction,
+        );
 
-        if (
-          distance >= 0 &&
-          distance <
-            CarManager.MIN_SPAWN_DISTANCE
-        ) {
+        if (distance >= 0 && distance < CarManager.MIN_SPAWN_DISTANCE) {
           return false;
         }
       }
@@ -1207,238 +1577,186 @@ export default class CarManager {
   }
 
   /**
-   * ==========================================
-   * Physical Collision Guard
-   * ==========================================
-   *
-   * این متد مشکل قبلی را حل می‌کند:
-   *
-   * 1. اگر خودرو واقعاً بیش از حد نزدیک باشد
-   *    متوقف می‌شود.
-   *
-   * 2. اگر خودرو در مسیر مستقیم برخورد باشد،
-   *    قبل از برخورد متوقف می‌شود.
-   *
-   * 3. خودروهایی که پشت سر خودرو هستند
-   *    باعث توقف بی‌دلیل آن نمی‌شوند.
-   *
-   * 4. خودروهای Transition نیز در محاسبه
-   *    لحاظ می‌شوند.
-   */
+
+==========================================
+
+Physical Collision Guard
+
+==========================================
+
+
+
+این Guard فعلاً مانند نسخه قبلی حفظ شده است.
+
+
+
+نکته مهم:
+
+updateTrafficState() از این متد برای توقف عادی Traffic استفاده
+
+نمی‌کند. بنابراین منطق Smooth Motion و جریان اصلی Traffic تحت تأثیر
+
+این Guard قرار نمی‌گیرد.
+*/
+  private shouldCheckRoadCollisionPair(
+    active: ActiveVehicleData,
+    other: ActiveVehicleData,
+  ): boolean {
+    const sameLane =
+      active.road === other.road && active.laneIndex === other.laneIndex;
+
+    if (sameLane) {
+      // در مسیر مستقیم، فقط خودروی جلویی می‌تواند مانع این خودرو باشد.
+      // خودروی عقب نباید باعث توقف خودروی جلویی شود.
+      const forwardGap = this.getForwardDistance(
+        active.road,
+        active.roadDistance,
+        other.roadDistance,
+        active.vehicle.getDirection(),
+      );
+
+      if (Math.abs(forwardGap) < 0.05) {
+        // اگر دو خودرو قبلاً دقیقاً روی هم افتاده‌اند، یک برنده ثابت انتخاب می‌شود.
+        return (
+          this.activeVehicles.indexOf(active) >
+          this.activeVehicles.indexOf(other)
+        );
+      }
+
+      return forwardGap > 0;
+    }
+
+    const mergingIntoLane =
+      other.trafficTransition !== null &&
+      other.trafficTransition.toRoad === active.road &&
+      other.trafficTransition.toLaneIndex === active.laneIndex;
+
+    // فقط خودروی هم‌لاین یا خودرویی که واقعاً وارد همین Lane می‌شود،
+    // به‌صورت مستقیم مانع محسوب می‌شود. Transition به‌تنهایی به معنی برخورد نیست.
+    if (sameLane || mergingIntoLane) {
+      return true;
+    }
+
+    // خودروی در حال Transition فقط وقتی مانع است که مسیرش با مسیر فعال
+    // در محدوده تقاطع تعارض واقعی داشته باشد؛ عبور از کنار هم کافی نیست.
+    if (!this.isIntersectionConflictWith(active, other)) {
+      return false;
+    }
+
+    // اگر چراغ فعالی وجود ندارد، حق تقدم بدون چرخه مشخص می‌کند چه کسی باید صبر کند.
+    const phase = this.getTrafficLightPhase(active);
+    if (!phase) {
+      return this.hasIntersectionPriorityBlocker(active);
+    }
+
+    // با وجود فاز چراغ، تصادف واقعی بین دو مسیر متعارض همچنان بررسی می‌شود.
+    return true;
+  }
 
   private isVehicleMovementBlocked(
     active: ActiveVehicleData,
     deltaTime: number,
   ): boolean {
-    const vehicle = active.vehicle;
+    const dt = THREE.MathUtils.clamp(
+      Number.isFinite(deltaTime) ? deltaTime : 0,
+      0,
+      0.1,
+    );
 
-    const currentPosition =
-      vehicle.group.position;
-
-    const speed = active.motionSpeed;
-
-    if (speed <= 0.001) {
+    if (dt <= 0) {
       return false;
     }
 
-    /**
-     * جهت حرکت خودروی فعلی.
-     */
-    this.setDirectionVector(
-      vehicle.getDirection(),
-      this.tempDirection,
+    // پیش‌بینی باید سرعت بعد از ترمز همین فریم را در نظر بگیرد، نه سرعت قبلی.
+    const currentSpeed = Math.max(0, active.motionSpeed);
+    const targetSpeed = THREE.MathUtils.clamp(
+      active.targetSpeed,
+      0,
+      CarManager.MAX_SPEED,
+    );
+    const speedRate =
+      targetSpeed < currentSpeed
+        ? CarManager.DECELERATION
+        : CarManager.ACCELERATION;
+    const predictedSpeed = Math.max(
+      0,
+      currentSpeed +
+        THREE.MathUtils.clamp(
+          targetSpeed - currentSpeed,
+          -speedRate * dt,
+          speedRate * dt,
+        ),
     );
 
-    /**
-     * موقعیت پیش‌بینی‌شده خودروی فعلی.
-     */
-    const predictionTime = Math.min(
-      Math.max(deltaTime, 0),
-      CarManager.VEHICLE_PREDICTION_TIME,
-    );
+    if (predictedSpeed <= 0.001) {
+      return false;
+    }
 
+    this.setDirectionVector(active.vehicle.getDirection(), this.tempDirection);
+
+    const predictionTime = Math.min(dt, CarManager.VEHICLE_PREDICTION_TIME);
+
+    const currentPosition = active.vehicle.group.position;
     this.tempPredictedPosition
       .copy(currentPosition)
-      .addScaledVector(
-        this.tempDirection,
-        Math.max(
-          speed * predictionTime,
-          0.05,
-        ),
-      );
+      .addScaledVector(this.tempDirection, predictedSpeed * predictionTime);
 
     for (const other of this.activeVehicles) {
       if (other === active) {
         continue;
       }
 
-      const otherPosition =
-        other.vehicle.group.position;
-
-      /**
-       * --------------------------------------
-       * فاصله فعلی
-       * --------------------------------------
-       */
-
-      const currentDistance =
-        currentPosition.distanceTo(
-          otherPosition,
-        );
-
-      /**
-       * اگر همین حالا خیلی نزدیک هستند،
-       * اجازه حرکت بیشتر داده نمی‌شود.
-       */
-      if (
-        currentDistance <=
-        CarManager.VEHICLE_COLLISION_DISTANCE
-      ) {
-        /**
-         * فقط وقتی خودرو جلویی/مسیر برخورد
-         * است متوقف می‌کنیم.
-         */
-        this.tempToOther
-          .copy(otherPosition)
-          .sub(currentPosition);
-
-        const forwardDistance =
-          this.tempToOther.dot(
-            this.tempDirection,
-          );
-
-        if (forwardDistance >= 0) {
-          return true;
-        }
-
-        /**
-         * اگر خودروی دیگر در حال حرکت به سمت
-         * ما باشد، آن را نیز به‌عنوان خطر
-         * در نظر می‌گیریم.
-         */
-        if (
-          other.trafficTransition ||
-          other.motionSpeed >
-            0.001
-        ) {
-          this.setDirectionVector(
-            other.vehicle.getDirection(),
-            this.tempOtherDirection,
-          );
-
-          const otherClosing =
-            this.tempOtherDirection.dot(
-              this.tempToOther,
-            );
-
-          if (otherClosing < 0) {
-            return true;
-          }
-        }
-      }
-
-      /**
-       * --------------------------------------
-       * فقط خودروهای جلویی
-       * --------------------------------------
-       */
-
-      this.tempToOther
-        .copy(otherPosition)
-        .sub(currentPosition);
-
-      const forwardDistance =
-        this.tempToOther.dot(
-          this.tempDirection,
-        );
-
-      /**
-       * خودروی پشت سر باعث توقف این خودرو
-       * نمی‌شود.
-       */
-      if (forwardDistance < 0) {
+      if (this.shouldIgnoreRedApproachForGreenTraffic(active, other)) {
         continue;
       }
 
-      /**
-       * فاصله جانبی.
-       *
-       * اگر خودرو روی مسیر دیگری باشد،
-       * Collision Guard نباید آن را متوقف کند.
-       */
-      const longitudinalDistance =
-        forwardDistance;
-
-      const lateralDistanceSquared =
-        Math.max(
-          0,
-          this.tempToOther.lengthSq() -
-            longitudinalDistance *
-              longitudinalDistance,
-        );
-
-      /**
-       * برای خودروهای همین مسیر،
-       * بررسی دقیق‌تر انجام می‌دهیم.
-       */
-      const sameTrafficPath =
-        lateralDistanceSquared <=
-        CarManager.VEHICLE_COLLISION_DISTANCE *
-          CarManager.VEHICLE_COLLISION_DISTANCE;
-
-      if (!sameTrafficPath) {
+      if (!this.shouldCheckRoadCollisionPair(active, other)) {
         continue;
       }
 
-      /**
-       * --------------------------------------
-       * پیش‌بینی موقعیت خودرو جلویی
-       * --------------------------------------
-       */
+      const otherPosition = other.vehicle.group.position;
+      this.tempOtherPredictedPosition.copy(otherPosition);
 
-      const otherSpeed =
-        other.motionSpeed;
-
-      this.setDirectionVector(
-        other.vehicle.getDirection(),
-        this.tempOtherDirection,
+      const otherCurrentSpeed = Math.max(0, other.motionSpeed);
+      const otherTargetSpeed = THREE.MathUtils.clamp(
+        other.targetSpeed,
+        0,
+        CarManager.MAX_SPEED,
+      );
+      const otherRate =
+        otherTargetSpeed < otherCurrentSpeed
+          ? CarManager.DECELERATION
+          : CarManager.ACCELERATION;
+      const otherPredictedSpeed = Math.max(
+        0,
+        otherCurrentSpeed +
+          THREE.MathUtils.clamp(
+            otherTargetSpeed - otherCurrentSpeed,
+            -otherRate * predictionTime,
+            otherRate * predictionTime,
+          ),
       );
 
-      this.tempOtherPredictedPosition
-        .copy(otherPosition)
-        .addScaledVector(
+      if (!other.trafficTransition && otherPredictedSpeed > 0.001) {
+        this.setDirectionVector(
+          other.vehicle.getDirection(),
           this.tempOtherDirection,
-          Math.max(
-            otherSpeed *
-              predictionTime,
-            0,
-          ),
         );
-
-      const predictedDistance =
-        this.tempPredictedPosition.distanceTo(
-          this.tempOtherPredictedPosition,
+        this.tempOtherPredictedPosition.addScaledVector(
+          this.tempOtherDirection,
+          otherPredictedSpeed * predictionTime,
         );
-
-      /**
-       * اگر در Frame بعدی فاصله کمتر از
-       * محدوده برخورد شود، جلویی را رد نمی‌کنیم.
-       */
-      if (
-        predictedDistance <=
-        CarManager.VEHICLE_COLLISION_DISTANCE
-      ) {
-        return true;
       }
 
-      /**
-       * اگر فاصله خیلی کم است و خودرو جلویی
-       * سرعت کمتری دارد، توقف لازم است.
-       */
+      const currentDistance = currentPosition.distanceTo(otherPosition);
+      const predictedDistance = this.tempPredictedPosition.distanceTo(
+        this.tempOtherPredictedPosition,
+      );
+
+      // فقط وقتی مسیر در حال نزدیک‌شدن به ناحیه برخورد است، Guard اضطراری فعال شود.
       if (
-        longitudinalDistance <=
-          CarManager.SAFE_FOLLOW_DISTANCE &&
-        otherSpeed <= speed
+        predictedDistance < CarManager.VEHICLE_COLLISION_DISTANCE &&
+        predictedDistance + 0.015 < currentDistance
       ) {
         return true;
       }
@@ -1448,62 +1766,212 @@ export default class CarManager {
   }
 
   /**
-   * ==========================================
-   * Traffic State
-   * ==========================================
+   * سرعت امن برای جلوگیری از نزدیک‌شدن ناگهانی به خودروی دیگر.
+   * ترمز از فاصله توقف شروع می‌شود؛ Collision Guard نهایی همچنان
+   * مسئول جلوگیری قطعی از برخورد است.
    */
-
-  private updateTrafficState(
+  private getCollisionBrakingSpeed(
+    active: ActiveVehicleData,
     deltaTime: number,
-  ): void {
-    const dt = Math.min(
-      Math.max(deltaTime, 0),
-      0.1,
-    );
+  ): number {
+    if (!Number.isFinite(deltaTime) || deltaTime <= 0) {
+      return active.cruiseSpeed;
+    }
 
+    let safeTargetSpeed = active.cruiseSpeed;
+    const currentPosition = active.vehicle.group.position;
+
+    this.setDirectionVector(active.vehicle.getDirection(), this.tempDirection);
+
+    for (const other of this.activeVehicles) {
+      if (other === active) {
+        continue;
+      }
+
+      if (this.shouldIgnoreRedApproachForGreenTraffic(active, other)) {
+        continue;
+      }
+
+      // دو خودرو در لاین‌های جداگانهٔ یک خیابان، مانع فیزیکی یکدیگر نیستند؛
+      // حتی اگر جهت حرکتشان مخالف باشد، نباید با نزدیک‌شدن از سرعتشان کم شود.
+      if (
+        active.road === other.road &&
+        active.laneIndex !== other.laneIndex &&
+        !active.trafficTransition &&
+        !other.trafficTransition
+      ) {
+        continue;
+      }
+
+      if (!this.shouldCheckRoadCollisionPair(active, other)) {
+        continue;
+      }
+
+      // برای صف مستقیم، منطق Follow فاصله ترمز را دقیق‌تر محاسبه می‌کند.
+      // این بخش مخصوص ادغام مسیرها و مسیرهای متعارض در تقاطع است.
+      if (active.road === other.road && active.laneIndex === other.laneIndex) {
+        continue;
+      }
+
+      const otherPosition = other.vehicle.group.position;
+      const currentDistance = currentPosition.distanceTo(otherPosition);
+
+      if (currentDistance <= 0.001) {
+        safeTargetSpeed = 0;
+        continue;
+      }
+
+      this.setDirectionVector(
+        other.vehicle.getDirection(),
+        this.tempOtherDirection,
+      );
+
+      // سرعت نسبی در راستای خط دید، مشخص می‌کند فاصله در حال کم‌شدن است یا نه.
+      this.tempToOther.copy(otherPosition).sub(currentPosition);
+
+      this.tempRelativeVelocity
+        .copy(this.tempOtherDirection)
+        .multiplyScalar(Math.max(0, other.motionSpeed))
+        .addScaledVector(this.tempDirection, -Math.max(0, active.motionSpeed));
+
+      const distanceRate =
+        this.tempToOther.dot(this.tempRelativeVelocity) / currentDistance;
+
+      if (distanceRate >= -0.025) {
+        continue;
+      }
+
+      const closingSpeed = -distanceRate;
+
+      // خودروِ متحرک مقابل نیز در زمان واکنش فاصله را می‌پوشاند؛
+      // این فاصله اضافه ترمز را قبل از فعال‌شدن Guard سخت آغاز می‌کند.
+      // حاشیه واکنش کمی بزرگ‌تر است تا ترمز قبل از رسیدن خودرو به محافظ
+      // سخت شروع شود و حرکت در فریم آخر مجبور به محدودشدن ناگهانی نشود.
+      const reactionBuffer =
+        0.9 + Math.min(closingSpeed, CarManager.MAX_SPEED * 2) * 0.5;
+
+      const availableBrakingDistance = Math.max(
+        0,
+        currentDistance -
+          CarManager.VEHICLE_COLLISION_DISTANCE -
+          reactionBuffer,
+      );
+
+      const safeSpeed = Math.sqrt(
+        2 * CarManager.DECELERATION * availableBrakingDistance,
+      );
+
+      safeTargetSpeed = Math.min(safeTargetSpeed, safeSpeed);
+    }
+
+    return safeTargetSpeed;
+  }
+
+  /**
+   * ==========================================
+   * Follow + Traffic Light
+   * ==========================================
+   *
+   * چراغ تقاطع فقط روی خودروهایی اثر می‌گذارد که هنوز به Stop Line
+   * نرسیده‌اند. Follow و Collision Guard نهایی حفظ می‌شوند.
+   *
+   * خودرویی که وارد Transition شده یا از Stop Line عبور کرده باشد،
+   * به خاطر چراغ متوقف نمی‌شود.
+   */
+  private updateTrafficState(_deltaTime: number): void {
+    /*
+چراغ قرمز، محدوده توقف و فاصله امن خودروها حفظ می‌شود.
+خودرو از فاصله مناسب پیش از خط توقف سرعتش را کم می‌کند و در چراغ
+قرمز/زرد یا فاز ایمنی تقاطع پشت خط عابر منتظر می‌ماند.
+*/
     for (const active of this.activeVehicles) {
       if (active.trafficTransition) {
+        /*
+
+Transition مستقل است و باید با سرعت طبیعی خودرو ادامه پیدا کند.
+*/
+        active.waitingAtIntersection = false;
+        active.intersectionWaitTime = 0;
+        active.targetSpeed = active.trafficTransition.blockedLastFrame
+          ? 0
+          : active.cruiseSpeed;
         continue;
       }
 
       /**
-       * خودروهایی که به انتهای یک Road بدون اتصال رسیده‌اند،
-       * تا وقتی هنوز داخل محدوده دید دوربین هستند نباید Teleport شوند.
-       *
-       * در نسخه قبلی، Candidate مقصد بلافاصله پیدا می‌شد و خودرو همان
-       * Frame به یک نقطه دور منتقل می‌شد؛ نتیجه از دید کاربر مثل
-       * ناپدید شدن/چشمک زدن خودرو بعد از حدود چند ثانیه بود.
-       *
-       * اینجا خودرو موقتاً نرم می‌ایستد و Recycle فقط وقتی انجام می‌شود
-       * که خود خودرو از محدوده امن تصویر خارج شده باشد.
-       */
+
+Pending recycle نباید باعث ایستادن خودرو شود.
+
+خودرو تا زمانی که خارج از محدوده دید قرار بگیرد، حرکت طبیعی خود را
+
+ادامه می‌دهد.
+*/
       if (this.pendingRecycleVehicles.has(active)) {
         active.waitingAtIntersection = false;
-        active.targetSpeed = 0;
+        active.intersectionWaitTime = 0;
+        active.targetSpeed = active.cruiseSpeed;
         continue;
       }
 
       const vehicle = active.vehicle;
-      const approach =
-        this.getIntersectionApproachInfo(active);
 
-      active.intersectionWaitTime = approach
-        ? active.intersectionWaitTime + dt
-        : 0;
+      /**
 
+حالت پایه: حرکت با سرعت Cruise.
+*/
+      active.targetSpeed = active.cruiseSpeed;
       active.waitingAtIntersection = false;
 
-      // به‌صورت پیش‌فرض خودرو می‌خواهد با سرعت طبیعی خودش حرکت کند.
-      active.targetSpeed = active.cruiseSpeed;
+      /**
+       * ======================================
+       * Traffic Light
+       * ======================================
+       *
+       * فقط خودروهای نزدیک Stop Line بررسی می‌شوند.
+       * خودروهای داخل تقاطع یا Transition، اینجا متوقف نمی‌شوند.
+       */
+      const trafficLightBlocked = this.isTrafficLightBlocking(active);
 
-      // خودرو جلویی را فقط روی همان Road و همان Lane بررسی می‌کنیم.
+      let trafficLightTargetSpeed = active.cruiseSpeed;
+
+      if (trafficLightBlocked) {
+        const approach = this.getIntersectionApproachInfo(active);
+
+        // ترمزگیری از فاصله مناسب شروع می‌شود تا خودرو نزدیک خط توقف بایستد.
+        const usableStoppingDistance = Math.max(
+          0,
+          (approach?.remaining ?? 0) - 0.45,
+        );
+        trafficLightTargetSpeed = approach
+          ? Math.min(
+              active.cruiseSpeed,
+              Math.sqrt(
+                2 *
+                  CarManager.TRAFFIC_LIGHT_APPROACH_DECELERATION *
+                  usableStoppingDistance,
+              ),
+            )
+          : 0;
+
+        active.targetSpeed = trafficLightTargetSpeed;
+        active.waitingAtIntersection = true;
+        active.intersectionWaitTime += Math.max(0, _deltaTime);
+      }
+
       let nearestFrontDistance = Infinity;
+      let nearestFrontSpeed = active.cruiseSpeed;
 
+      /**
+
+
+
+خودروی جلویی روی همان Road و همان Lane
+
+
+
+*/
       for (const other of this.activeVehicles) {
-        if (
-          other === active ||
-          other.trafficTransition
-        ) {
+        if (other === active || other.trafficTransition) {
           continue;
         }
 
@@ -1514,226 +1982,838 @@ export default class CarManager {
           continue;
         }
 
-        const distance =
-          this.getForwardDistance(
-            active.road,
-            active.roadDistance,
-            other.roadDistance,
-            vehicle.getDirection(),
-          );
+        const distance = this.getForwardDistance(
+          active.road,
+          active.roadDistance,
+          other.roadDistance,
+          vehicle.getDirection(),
+        );
 
-        if (
-          distance >= 0 &&
-          distance < nearestFrontDistance
-        ) {
+        if (distance >= 0 && distance < nearestFrontDistance) {
           nearestFrontDistance = distance;
+          nearestFrontSpeed = Math.max(0, other.motionSpeed);
         }
       }
 
-      // خودرویی که در Transition وارد همین Lane می‌شود نیز مانع محسوب می‌شود.
+      /**
+
+
+
+خودرویی که از Transition وارد همین Lane می‌شود
+
+
+
+*/
       for (const other of this.activeVehicles) {
-        if (
-          other === active ||
-          !other.trafficTransition
-        ) {
+        if (other === active || !other.trafficTransition) {
           continue;
         }
 
-        const transition =
-          other.trafficTransition;
+        const transition = other.trafficTransition;
 
         if (
           transition.toRoad !== active.road ||
-          transition.toLaneIndex !==
-            active.laneIndex
+          transition.toLaneIndex !== active.laneIndex
         ) {
           continue;
         }
 
-        const distance =
-          this.getForwardDistance(
-            active.road,
-            active.roadDistance,
-            transition.finalDistance,
-            vehicle.getDirection(),
-          );
-
-        if (
-          distance >= 0 &&
-          distance < nearestFrontDistance
-        ) {
-          nearestFrontDistance = distance;
-        }
-      }
-
-      /**
-       * فاصله خیلی کم:
-       * Target را صفر می‌کنیم، اما Vehicle را stop نمی‌کنیم.
-       *
-       * بنابراین motionSpeed به‌صورت نرم پایین می‌آید.
-       */
-      if (
-        nearestFrontDistance <=
-        CarManager.SAFE_FOLLOW_DISTANCE
-      ) {
-        active.targetSpeed = 0;
-        continue;
-      }
-
-      /**
-       * خودرو جلوتر نزدیک است:
-       * سرعت هدف را متناسب با فاصله کم می‌کنیم.
-       */
-      if (
-        nearestFrontDistance <=
-        CarManager.FRONT_DETECTION_DISTANCE
-      ) {
-        const ratio = Math.max(
-          0,
-          Math.min(
-            1,
-            (nearestFrontDistance -
-              CarManager.SAFE_FOLLOW_DISTANCE) /
-              (CarManager.FRONT_DETECTION_DISTANCE -
-                CarManager.SAFE_FOLLOW_DISTANCE),
-          ),
+        const distance = this.getForwardDistance(
+          active.road,
+          active.roadDistance,
+          transition.finalDistance,
+          vehicle.getDirection(),
         );
 
-        active.targetSpeed =
-          active.cruiseSpeed * ratio;
-
-        continue;
-      }
-
-      // تقاطع خالی نباید خودرو را بی‌دلیل متوقف کند.
-      if (approach) {
-        const occupied =
-          this.isIntersectionOccupied(active);
-
-        const conflict =
-          this.hasIntersectionPriorityBlocker(
-            active,
-          );
-
-        if (occupied || conflict) {
-          active.waitingAtIntersection = true;
-          active.targetSpeed = 0;
-          continue;
+        if (distance >= 0 && distance < nearestFrontDistance) {
+          nearestFrontDistance = distance;
+          nearestFrontSpeed = Math.max(0, other.motionSpeed);
         }
       }
 
-      active.intersectionWaitTime = 0;
-      active.waitingAtIntersection = false;
+      /**
+       * Smooth Following
+       * سرعت هدف از فاصلهٔ ترمز و سرعت خودروی جلویی محاسبه می‌شود تا
+       * با عبور از یک آستانهٔ ثابت، فرمان سرعت ناگهان از Cruise به صفر نپرد.
+       */
+      if (nearestFrontDistance <= CarManager.FRONT_DETECTION_DISTANCE) {
+        // محدودیت سرعت بر اساس فاصلهٔ لازم برای ترمز، نه یک آستانهٔ ناگهانی.
+        // اگر خودروی جلو آهسته یا متوقف باشد، سرعت امن متناسب با فاصله کم می‌شود.
+        const availableBrakingDistance = Math.max(
+          0,
+          nearestFrontDistance - CarManager.SAFE_FOLLOW_DISTANCE,
+        );
+        const frontSpeed = Math.max(0, nearestFrontSpeed);
+        const safeFollowingSpeed = Math.sqrt(
+          frontSpeed * frontSpeed +
+            2 * CarManager.DECELERATION * availableBrakingDistance,
+        );
+
+        active.targetSpeed = Math.min(active.targetSpeed, safeFollowingSpeed);
+      }
+
+      /**
+
+اگر Collision واقعی/پیش‌بینی‌شده باشد، برای جلوگیری از برخورد
+
+توقف مجاز است. این بخش مربوط به چراغ یا تقاطع نیست.
+*/
+      /**
+       * اگر Collision واقعی/پیش‌بینی‌شده باشد، برای جلوگیری از برخورد
+       * توقف مجاز است. این بخش مربوط به چراغ یا تقاطع نیست.
+       *
+       * فقط همان Collision Guard موجود در همین فایل دوباره فعال می‌شود؛
+       * هیچ مقدار، تعداد خودرو، Spawn یا منطق Transition دیگری تغییر نمی‌کند.
+       */
+      const collisionBrakingSpeed = this.getCollisionBrakingSpeed(
+        active,
+        _deltaTime,
+      );
+      active.targetSpeed = Math.min(active.targetSpeed, collisionBrakingSpeed);
+
+      if (this.isVehicleMovementBlocked(active, _deltaTime)) {
+        // پیش‌بینی برخورد نباید فرمان سرعت را در یک فریم از Cruise به صفر بپراند.
+        // هر فریم فقط یک گام ترمز فیزیکی درخواست می‌کنیم؛ محافظ موقعیت پایین‌تر
+        // همچنان از برخورد واقعی جلوگیری می‌کند.
+        const emergencyBrakeDelta = THREE.MathUtils.clamp(
+          Number.isFinite(_deltaTime) ? _deltaTime : 0,
+          0,
+          0.1,
+        );
+        const progressiveBrakeTarget = Math.max(
+          0,
+          active.motionSpeed - CarManager.DECELERATION * emergencyBrakeDelta,
+        );
+
+        active.targetSpeed = Math.min(
+          active.targetSpeed,
+          progressiveBrakeTarget,
+        );
+      }
+
+      // بدون چراغ فعال، حق‌تقدم حفظ می‌شود؛ اما خودرو از فاصلهٔ توقف امن
+      // سرعتش را کم می‌کند، نه اینکه با دیدن مانع فوراً هدف سرعتش صفر شود.
+      const activePhase = this.getTrafficLightPhase(active);
+      const priorityApproach = this.getIntersectionApproachInfo(active);
+      const priorityBlocked = Boolean(
+        !activePhase &&
+        priorityApproach &&
+        priorityApproach.remaining >= 0 &&
+        this.hasIntersectionPriorityBlocker(active),
+      );
+
+      if (priorityBlocked && priorityApproach) {
+        const priorityBrakingDistance = Math.max(
+          0,
+          priorityApproach.remaining - 0.35,
+        );
+        const priorityTargetSpeed = Math.sqrt(
+          2 *
+            CarManager.TRAFFIC_LIGHT_APPROACH_DECELERATION *
+            priorityBrakingDistance,
+        );
+        active.targetSpeed = Math.min(active.targetSpeed, priorityTargetSpeed);
+        active.waitingAtIntersection = true;
+      }
+
+      // تایمر فقط وقتی جلو می‌رود که خودرو واقعاً نزدیک خط توقف، تقریباً ایستاده
+      // و بدون چراغ فعال باشد؛ بنابراین صف عادی یا چراغ قرمز دور زده نمی‌شود.
+      const waitingAtUncontrolledIntersection = Boolean(
+        !activePhase &&
+        priorityApproach &&
+        priorityApproach.remaining >= 0 &&
+        priorityApproach.remaining <= 2.0 &&
+        active.motionSpeed <= 0.5,
+      );
+
+      if (waitingAtUncontrolledIntersection && priorityApproach) {
+        active.intersectionWaitTime += Math.max(0, _deltaTime);
+
+        // اگر چند خودرو به‌خاطر حق‌تقدم یکدیگر را قفل کرده باشند،
+        // پس از انتظار محدود فقط یک خودرو با ترتیب قطعی آزاد می‌شود.
+        if (
+          active.intersectionWaitTime >=
+            CarManager.INTERSECTION_MAX_WAIT_TIME &&
+          this.isIntersectionDeadlockReleaseLeader(active, priorityApproach) &&
+          !this.hasNearbyIntersectionRelease(active, priorityApproach)
+        ) {
+          active.intersectionReleaseTime =
+            CarManager.INTERSECTION_RELEASE_DURATION;
+          active.intersectionWaitTime = 0;
+          active.waitingAtIntersection = false;
+          active.targetSpeed = Math.min(
+            active.cruiseSpeed,
+            CarManager.DEADLOCK_RELEASE_SPEED,
+          );
+        }
+      } else if (!trafficLightBlocked) {
+        active.intersectionWaitTime = 0;
+      }
+
+      // Deadlock recovery lowers speed only when the current signal permits movement.
+      if (active.intersectionReleaseTime > 0 && !trafficLightBlocked) {
+        active.targetSpeed = Math.min(
+          active.targetSpeed,
+          CarManager.DEADLOCK_RELEASE_SPEED,
+        );
+      }
+
+      /**
+       * Follow و Collision ممکن است targetSpeed را دوباره تغییر داده باشند؛
+       * اگر چراغ هنوز قرمز/زرد است، تصمیم چراغ باید در نهایت برنده باشد.
+       */
+      if (trafficLightBlocked) {
+        active.targetSpeed = Math.min(
+          active.targetSpeed,
+          trafficLightTargetSpeed,
+        );
+      }
+
+      active.targetSpeed = THREE.MathUtils.clamp(
+        active.targetSpeed,
+        0,
+        CarManager.MAX_SPEED,
+      );
     }
   }
 
   /**
    * ==========================================
-   * Intersection Priority Blocker
+   * Traffic Light Blocker
    * ==========================================
+   *
+   * وضعیت منطقی چراغ از TrafficLightController گرفته می‌شود.
+   * چراغ فیزیکی فقط نمایش‌دهنده است؛ تصمیم حرکت خودرو بر اساس Phase
+   * منطقی همان تقاطع انجام می‌شود.
    */
-
-  private hasIntersectionPriorityBlocker(
+  private getTrafficLightPhase(
     active: ActiveVehicleData,
-  ): boolean {
-    const approach = this.getIntersectionApproachInfo(active);
-    if (!approach) return false;
-
-    for (const other of this.activeVehicles) {
-      if (other === active || other.trafficTransition) continue;
-
-      const otherApproach = this.getIntersectionApproachInfo(other);
-      if (!otherApproach) continue;
-
-      const sameIntersection = approach.connectionPoint.distanceTo(otherApproach.connectionPoint) <= 2.5;
-      if (!sameIntersection) continue;
-
-      // خودرویی که زودتر به مرکز تقاطع رسیده، حق عبور خود را حفظ می‌کند.
-      // این ترتیب زمانی است، نه ترتیب index آرایه.
-      const activeRemaining = approach.remaining;
-      const otherRemaining = otherApproach.remaining;
-
-      if (otherRemaining < activeRemaining - 0.25) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  /**
-   * ==========================================
-   * Intersection Occupancy
-   * ==========================================
-   */
-
-  private isIntersectionOccupied(
-    active: ActiveVehicleData,
-  ): boolean {
-    const approach = this.getIntersectionApproachInfo(active);
-    if (!approach) return false;
-
-    for (const other of this.activeVehicles) {
-      if (other === active) continue;
-
-      const position = other.vehicle.group.position;
-      const distance = approach.connectionPoint.distanceTo(position);
-
-      // خودروهای داخل خود تقاطع یا Transition نزدیک آن، مانع هستند.
-      if (distance <= CarManager.INTERSECTION_OCCUPANCY_DISTANCE) {
-        return true;
-      }
-
-      const transition = other.trafficTransition;
-      if (transition) {
-        const transitionDistance = approach.connectionPoint.distanceTo(transition.end);
-        if (transitionDistance <= CarManager.INTERSECTION_OCCUPANCY_DISTANCE) return true;
-      }
-    }
-
-    return false;
-  }
-
-  /**
-   * ==========================================
-   * Intersection Approach Info
-   * ==========================================
-   */
-
-  private getIntersectionApproachInfo(
-    active: ActiveVehicleData,
-  ): {
-    remaining: number;
-    connectionPoint: THREE.Vector3;
-  } | null {
-    const direction = active.vehicle.getDirection();
-    const movingPositive = this.isMovingPositive(direction);
-    const endpointDistance = movingPositive
-      ? active.road.getLongitudinalMax()
-      : active.road.getLongitudinalMin();
-
-    const remaining = movingPositive
-      ? endpointDistance - active.roadDistance
-      : active.roadDistance - endpointDistance;
-
-    if (remaining < 0 || remaining > CarManager.INTERSECTION_APPROACH_DISTANCE) {
+  ): ReturnType<TrafficLightController["getIntersectionPhase"]> {
+    const controller = TrafficLightController.getActiveController();
+    if (!controller) {
       return null;
     }
 
-    const connectionPoint = this.getVehicleWorldPosition(
+    const center = this.tempWorldPosition;
+    active.road.group.getWorldPosition(center);
+    return controller.getIntersectionPhase(center);
+  }
+
+  /**
+   * TrafficLightController direction یعنی سمتی که خودرو از آن وارد تقاطع می‌شود؛
+   * VehicleDirection یعنی سمتی که خودرو در آن حرکت می‌کند. این دو معکوس‌اند.
+   */
+  private getIncomingTrafficDirection(
+    direction: VehicleDirection,
+  ): VehicleDirection {
+    const incomingDirection: Record<VehicleDirection, VehicleDirection> = {
+      north: "south",
+      south: "north",
+      east: "west",
+      west: "east",
+    };
+
+    return incomingDirection[direction];
+  }
+
+  /** وضعیت چراغ مخصوص سمتی که این خودرو از آن به تقاطع نزدیک می‌شود. */
+  private getTrafficLightStateForVehicle(
+    active: ActiveVehicleData,
+  ): ReturnType<TrafficLightController["getIntersectionLightState"]> {
+    const controller = TrafficLightController.getActiveController();
+    if (!controller) {
+      return null;
+    }
+
+    const center = this.tempWorldPosition;
+    active.road.group.getWorldPosition(center);
+    const incomingDirection = this.getIncomingTrafficDirection(
+      active.vehicle.getDirection(),
+    );
+
+    return controller.getIntersectionLightState(center, incomingDirection);
+  }
+
+  /**
+   * اگر active چراغ سبز دارد و خودروی عمود بر آن پشت چراغ قرمز منتظر است،
+   * خودروی قرمز را مانع نمی‌شماریم. خودروهای دارای Transition مستثنا هستند.
+   */
+  private shouldIgnoreRedApproachForGreenTraffic(
+    active: ActiveVehicleData,
+    other: ActiveVehicleData,
+  ): boolean {
+    if (other.trafficTransition) {
+      return false;
+    }
+
+    if (
+      active.intersectionReleaseTime > 0 &&
+      other.waitingAtIntersection &&
+      other.motionSpeed <= 0.5 &&
+      this.isIntersectionConflictWith(active, other)
+    ) {
+      const phase = this.getTrafficLightPhase(active);
+      const activeHasGreen =
+        this.getTrafficLightStateForVehicle(active) === "green";
+      // Deadlock recovery may bypass a stopped blocker only for a permitted movement.
+      if (activeHasGreen || !phase) {
+        return true;
+      }
+    }
+
+    if (!this.isIntersectionConflictWith(active, other)) {
+      return false;
+    }
+
+    const activePhase = this.getTrafficLightPhase(active);
+    const otherPhase = this.getTrafficLightPhase(other);
+
+    if (!activePhase || !otherPhase) {
+      return false;
+    }
+
+    if (
+      this.isTrafficLightBlocking(active) ||
+      !this.isTrafficLightBlocking(other)
+    ) {
+      return false;
+    }
+
+    const otherApproach = this.getIntersectionApproachInfo(other);
+    if (!otherApproach) {
+      return false;
+    }
+
+    // فقط وقتی خودروی مسیر قرمز نزدیک خط توقف و تقریباً متوقف است،
+    // اجازه می‌دهیم مسیر سبز به‌خاطر آن در Collision Guard قفل نشود.
+    return otherApproach.remaining <= 1.25 && other.motionSpeed <= 1.5;
+  }
+
+  private isTrafficLightBlocking(active: ActiveVehicleData): boolean {
+    if (active.trafficTransition) {
+      return false;
+    }
+
+    const approach = this.getIntersectionApproachInfo(active);
+    if (!approach) {
+      return false;
+    }
+
+    // Once past the stop line, clear the intersection instead of stopping on a phase change.
+    if (approach.remaining < -0.25) {
+      return false;
+    }
+
+    const phase = this.getTrafficLightPhase(active);
+    if (!phase) {
+      return false;
+    }
+
+    // The signal direction is the approach side, not the vehicle's travel heading.
+    // Vehicles already past the stop line are allowed to clear the intersection.
+    return this.getTrafficLightStateForVehicle(active) !== "green";
+  }
+
+  /**
+   * ==========================================
+   * Clamp Vehicle To Intersection Stop Line
+   * ==========================================
+   *
+   * خودرو فقط وقتی به خط توقف خیلی نزدیک شده باشد Snap می‌شود.
+   * این Snap کوچک است و فقط برای جلوگیری از عبور میلی‌متری از خط است.
+   */
+  private clampVehicleToIntersectionStopLine(active: ActiveVehicleData): void {
+    const approach = this.getIntersectionApproachInfo(active);
+
+    if (!approach) {
+      return;
+    }
+
+    const stopLineDistance = this.getIntersectionStopDistance(active);
+
+    const distanceToStopLine = Math.abs(active.roadDistance - stopLineDistance);
+
+    /**
+     * فقط وقتی خودرو خیلی نزدیک خط توقف است Snap می‌کنیم.
+     * این کار جلوی رد شدن چند سانتی‌متری از خط را می‌گیرد،
+     * بدون اینکه حرکت عادی خودرو را Teleport کند.
+     */
+    // اصلاح نقطه فقط وقتی مجاز است که خودرو عملاً متوقف شده باشد؛
+    // Snap در سرعت قابل‌توجه باعث پرش موقعیت و توقف ظاهری ناگهانی می‌شد.
+    if (
+      distanceToStopLine > CarManager.INTERSECTION_STOP_SNAP_DISTANCE ||
+      active.motionSpeed > 0.12
+    ) {
+      return;
+    }
+
+    active.roadDistance = stopLineDistance;
+
+    const position = this.getVehicleWorldPosition(
       active.road,
       active.laneIndex,
-      endpointDistance,
-    ).clone();
+      stopLineDistance,
+    );
+
+    active.vehicle.group.position.copy(position);
+    active.vehicle.group.position.y = CarManager.VEHICLE_Y;
+  }
+
+  /**
+
+==========================================
+
+Intersection Priority Blocker
+
+==========================================
+
+
+
+نسخه قبلی اینجا یک مشکل مهم داشت:
+
+
+
+
+
+if (otherRemaining < activeRemaining)
+
+
+
+    return true;
+
+
+
+بدون اینکه بررسی کند آیا مسیر دو خودرو واقعاً با هم
+
+برخورد می‌کند یا خیر.
+
+
+
+بنابراین مثلاً:
+
+
+
+
+
+   ← A
+
+
+
+   │
+
+
+
+   │
+
+
+
+   B
+
+
+
+   ↑
+
+
+
+ممکن بود A صرفاً به خاطر نزدیک‌تر بودن B متوقف شود،
+
+در حالی که مسیر مستقیم آن‌ها لزوماً یک مسیر مشترک نیست.
+
+
+
+اکنون فقط Approachهای عمود بر هم به‌عنوان Conflict بررسی می‌شوند.
+*/
+  private hasIntersectionPriorityBlocker(active: ActiveVehicleData): boolean {
+    if (active.intersectionReleaseTime > 0) {
+      return false;
+    }
+
+    const approach = this.getIntersectionApproachInfo(active);
+
+    if (!approach || approach.remaining < 0) {
+      return false;
+    }
+
+    const activeDirection = active.vehicle.getDirection();
+
+    /**
+     * وقتی تقاطع فاز چراغ دارد، همان فاز منبع اصلی حق عبور است.
+     * این جلوی چرخه‌ای را می‌گیرد که خودروهای چهار جهت همگی منتظر هم می‌مانند.
+     */
+    const phase = this.getTrafficLightPhase(active);
+    if (phase) {
+      return this.getTrafficLightStateForVehicle(active) !== "green";
+    }
+
+    /**
+     * بدون فاز چراغ: خودروی نزدیک‌تر اولویت دارد؛ اگر فاصله‌ها تقریباً برابر
+     * باشند، ترتیب ثابت north → east → south → west تساوی را می‌شکند.
+     * این قانون نمی‌تواند چرخهٔ حق‌تقدم چهارجهته بسازد.
+     */
+    for (const other of this.activeVehicles) {
+      if (other === active || other.trafficTransition) {
+        continue;
+      }
+
+      const otherDirection = other.vehicle.getDirection();
+      const isCrossingDirection =
+        activeDirection === "north" || activeDirection === "south"
+          ? otherDirection === "east" || otherDirection === "west"
+          : otherDirection === "north" || otherDirection === "south";
+
+      if (!isCrossingDirection) {
+        continue;
+      }
+
+      const otherApproach = this.getIntersectionApproachInfo(other);
+
+      if (!otherApproach) {
+        continue;
+      }
+
+      if (
+        approach.connectionPoint.distanceTo(otherApproach.connectionPoint) >
+        CarManager.INTERSECTION_MATCH_DISTANCE
+      ) {
+        continue;
+      }
+
+      if (
+        otherApproach.remaining <
+        approach.remaining - CarManager.INTERSECTION_PRIORITY_MARGIN
+      ) {
+        return true;
+      }
+
+      if (
+        Math.abs(otherApproach.remaining - approach.remaining) <=
+          CarManager.INTERSECTION_PRIORITY_MARGIN &&
+        this.hasIntersectionTiePriority(otherDirection, activeDirection)
+      ) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * بررسی می‌کند که دو خودرو واقعاً در Conflict یک تقاطع هستند.
+   * فقط مسیرهای عمود بر هم Conflict دارند؛ مسیرهای موازی ندارند.
+   */
+  private isIntersectionConflictWith(
+    active: ActiveVehicleData,
+    other: ActiveVehicleData,
+  ): boolean {
+    const activeApproach = this.getIntersectionApproachInfo(active);
+    const otherApproach = this.getIntersectionApproachInfo(other);
+
+    if (!activeApproach || !otherApproach) {
+      return false;
+    }
+
+    const sameIntersection =
+      activeApproach.connectionPoint.distanceTo(
+        otherApproach.connectionPoint,
+      ) <= CarManager.INTERSECTION_MATCH_DISTANCE;
+
+    if (!sameIntersection) {
+      return false;
+    }
+
+    const activeDirection = active.vehicle.getDirection();
+    const otherDirection = other.vehicle.getDirection();
+
+    return activeDirection === "north" || activeDirection === "south"
+      ? otherDirection === "east" || otherDirection === "west"
+      : otherDirection === "north" || otherDirection === "south";
+  }
+
+  /**
+   * فقط یک خودرو در هر تقاطع اجازهٔ بازیابی بن‌بست دارد.
+   * انتخاب بر اساس نزدیک‌ترین Approach، سپس ترتیب ثابت جهت و در نهایت
+   * ترتیب داخلی خودروهاست تا چند خودرو هم‌زمان آزاد نشوند.
+   */
+  private isIntersectionDeadlockReleaseLeader(
+    active: ActiveVehicleData,
+    activeApproach: { remaining: number; connectionPoint: THREE.Vector3 },
+  ): boolean {
+    const activeDirection = active.vehicle.getDirection();
+    const activeDirectionPriority: Record<VehicleDirection, number> = {
+      north: 0,
+      east: 1,
+      south: 2,
+      west: 3,
+    };
+    const activeIndex = this.activeVehicles.indexOf(active);
+
+    for (const other of this.activeVehicles) {
+      if (other === active || other.trafficTransition) {
+        continue;
+      }
+
+      const otherApproach = this.getIntersectionApproachInfo(other);
+      if (
+        !otherApproach ||
+        otherApproach.remaining < 0 ||
+        activeApproach.connectionPoint.distanceTo(
+          otherApproach.connectionPoint,
+        ) > CarManager.INTERSECTION_MATCH_DISTANCE
+      ) {
+        continue;
+      }
+
+      if (
+        otherApproach.remaining <
+        activeApproach.remaining - CarManager.INTERSECTION_PRIORITY_MARGIN
+      ) {
+        return false;
+      }
+
+      if (
+        Math.abs(otherApproach.remaining - activeApproach.remaining) <=
+        CarManager.INTERSECTION_PRIORITY_MARGIN
+      ) {
+        const otherDirection = other.vehicle.getDirection();
+        const otherPriority = activeDirectionPriority[otherDirection];
+        const activePriority = activeDirectionPriority[activeDirection];
+
+        if (
+          otherPriority < activePriority ||
+          (otherPriority === activePriority &&
+            this.activeVehicles.indexOf(other) < activeIndex)
+        ) {
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  /**
+   * بررسی می‌کند که خودروی دیگری در همین محدودهٔ تقاطع در حال بازیابی نباشد.
+   */
+  private hasNearbyIntersectionRelease(
+    active: ActiveVehicleData,
+    approach: { remaining: number; connectionPoint: THREE.Vector3 },
+  ): boolean {
+    return this.activeVehicles.some((other) => {
+      if (other === active || other.intersectionReleaseTime <= 0) {
+        return false;
+      }
+
+      const otherApproach = this.getIntersectionApproachInfo(other);
+      if (otherApproach) {
+        return (
+          approach.connectionPoint.distanceTo(otherApproach.connectionPoint) <=
+          CarManager.INTERSECTION_MATCH_DISTANCE
+        );
+      }
+
+      return (
+        other.vehicle.group.position.distanceTo(approach.connectionPoint) <= 12
+      );
+    });
+  }
+
+  /**
+
+==========================================
+
+Intersection Tie Priority
+
+==========================================
+
+
+
+Priority ثابت برای زمانی که دو خودرو تقریباً دقیقاً
+
+همزمان به یک تقاطع می‌رسند.
+
+
+
+ترتیب:
+
+
+
+north → east → south → west
+
+
+
+این ترتیب فقط Tie را حل می‌کند و در حالت عادی
+
+وارد تصمیم Traffic نمی‌شود.
+*/
+  private hasIntersectionTiePriority(
+    otherDirection: VehicleDirection,
+    activeDirection: VehicleDirection,
+  ): boolean {
+    const priority: Record<VehicleDirection, number> = {
+      north: 0,
+      east: 1,
+      south: 2,
+      west: 3,
+    };
+
+    return priority[otherDirection] < priority[activeDirection];
+  }
+
+  /**
+
+==========================================
+
+Intersection Occupancy
+
+==========================================
+
+
+
+این تابع دیگر شعاع 6 متری قبلی را استفاده نمی‌کند.
+
+
+
+فقط خودروهایی که واقعاً نزدیک مرکز اتصال هستند،
+
+تقاطع را Occupied می‌کنند.
+
+
+
+این تغییر مهم است چون یک خودرو که هنوز چند متر قبل
+
+از تقاطع است نباید باعث توقف چهار خودروی دیگر شود.
+*/
+  private isIntersectionOccupied(active: ActiveVehicleData): boolean {
+    const approach = this.getIntersectionApproachInfo(active);
+
+    if (!approach) {
+      return false;
+    }
+
+    for (const other of this.activeVehicles) {
+      if (other === active) {
+        continue;
+      }
+
+      /**
+       * --------------------------------------
+       * Normal Vehicle
+       * --------------------------------------
+       */
+
+      const position = other.vehicle.group.position;
+
+      const distance = approach.connectionPoint.distanceTo(position);
+
+      if (distance <= CarManager.INTERSECTION_OCCUPANCY_DISTANCE) {
+        /**
+         * خودرویی که هنوز Approach خودش را طی می‌کند
+         * نباید صرفاً به خاطر نزدیکی نقطه‌ای Occupied
+         * حساب شود.
+         *
+         * اگر خودرو واقعاً روی همین مرکز تقاطع است،
+         * Occupied معتبر است.
+         */
+        const otherApproach = this.getIntersectionApproachInfo(other);
+
+        if (!otherApproach) {
+          return true;
+        }
+      }
+
+      /**
+       * --------------------------------------
+       * Transition
+       * --------------------------------------
+       */
+
+      const transition = other.trafficTransition;
+
+      if (transition) {
+        const transitionDistance = approach.connectionPoint.distanceTo(
+          transition.end,
+        );
+
+        if (transitionDistance <= CarManager.INTERSECTION_TRANSITION_DISTANCE) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /**
+
+==========================================
+
+Intersection Approach Info
+
+==========================================
+*/
+
+  /**
+
+==========================================
+
+Intersection Stop Distance
+
+==========================================
+
+
+
+Stop Line واقعی همان نقطه‌ای است که آخرین Dash ورودی Road قرار می‌گیرد.
+
+
+
+در Road فعلی این نقطه حدود 2.5m قبل از endpoint قرار دارد.
+
+تمام محاسبات Approach، Braking و Clamp از همین تابع استفاده می‌کنند
+
+تا دیگر بین توابع اختلاف فاصله وجود نداشته باشد.
+*/
+  private getIntersectionStopDistance(active: ActiveVehicleData): number {
+    // The crossing is centered on the Road group; local longitudinal zero is its center.
+    return this.isMovingPositive(active.vehicle.getDirection())
+      ? -CarManager.INTERSECTION_STOP_DISTANCE_FROM_CENTER
+      : CarManager.INTERSECTION_STOP_DISTANCE_FROM_CENTER;
+  }
+
+  private getIntersectionApproachInfo(active: ActiveVehicleData): {
+    remaining: number;
+    connectionPoint: THREE.Vector3;
+  } | null {
+    const movingPositive = this.isMovingPositive(active.vehicle.getDirection());
+    const stopLineDistance = this.getIntersectionStopDistance(active);
+    const remaining = movingPositive
+      ? stopLineDistance - active.roadDistance
+      : active.roadDistance - stopLineDistance;
+
+    const approaching =
+      remaining >= 0 && remaining <= CarManager.INTERSECTION_APPROACH_DISTANCE;
+    const occupyingIntersection =
+      Math.abs(active.roadDistance) <=
+      CarManager.INTERSECTION_CONFLICT_ZONE_HALF_LENGTH;
+
+    if (!approaching && !occupyingIntersection) {
+      return null;
+    }
+
+    // Both perpendicular Roads use the same world-space center for this intersection.
+    const connectionPoint = new THREE.Vector3();
+    active.road.group.getWorldPosition(connectionPoint);
 
     return { remaining, connectionPoint };
   }
 
   /**
-   * ==========================================
-   * Forward Distance
-   * ==========================================
-   */
+
+==========================================
+
+Forward Distance
+
+==========================================
+*/
 
   private getForwardDistance(
     _road: Road,
@@ -1741,72 +2821,76 @@ export default class CarManager {
     otherDistance: number,
     direction: VehicleDirection,
   ): number {
-    // Roadها finite هستند؛ wrap کردن فاصله باعث می‌شد خودرو انتهای Road را
-    // به اشتباه به‌عنوان خودروی جلویی در ابتدای همان Road ببیند.
-    // در Vehicle.ts:
-    // north  => z-
-    // south  => z+
-    // east   => x+
-    // west   => x-
-    // بنابراین north و west روی محور طولی Road در جهت منفی حرکت می‌کنند.
+    /**
+     * Roadها finite هستند.
+     *
+     * north / west:
+     *     حرکت روی محور طولی در جهت منفی
+     *
+     * south / east:
+     *     حرکت روی محور طولی در جهت مثبت
+     */
     return direction === "south" || direction === "east"
       ? otherDistance - currentDistance
       : currentDistance - otherDistance;
   }
 
   /**
-   * ==========================================
-   * Road Progress
-   * ==========================================
-   */
 
-  private updateRoadProgress(
-    active: ActiveVehicleData,
-  ): void {
+==========================================
+
+Road Progress
+
+==========================================
+*/
+
+  private updateRoadProgress(active: ActiveVehicleData): void {
     const vehicle = active.vehicle;
 
     const road = active.road;
 
-    this.tempLocalPosition.copy(
-      vehicle.group.position,
-    );
+    this.tempLocalPosition.copy(vehicle.group.position);
 
-    road.group.worldToLocal(
-      this.tempLocalPosition,
-    );
+    road.group.worldToLocal(this.tempLocalPosition);
 
-    active.roadDistance =
-      this.tempLocalPosition.z;
+    active.roadDistance = this.tempLocalPosition.z;
 
-    const movingPositive =
-      this.isMovingPositive(
-        vehicle.getDirection(),
-      );
+    const movingPositive = this.isMovingPositive(vehicle.getDirection());
 
     const roadEnd = movingPositive
       ? road.getLongitudinalMax()
       : road.getLongitudinalMin();
 
     const remaining = movingPositive
-      ? roadEnd -
-        active.roadDistance
-      : active.roadDistance -
-        roadEnd;
+      ? roadEnd - active.roadDistance
+      : active.roadDistance - roadEnd;
 
     if (
-      remaining <=
-      CarManager.TRANSITION_TRIGGER_DISTANCE
+      !active.waitingAtIntersection &&
+      active.targetSpeed > 0.1 &&
+      remaining <= CarManager.TRANSITION_TRIGGER_DISTANCE
     ) {
-      const transitioned =
-        this.tryStartRoadTransition(
-          active,
-          movingPositive,
-        );
+      const transitioned = this.tryStartRoadTransition(active, movingPositive);
 
-      if (!transitioned) {
-        // اگر Road متصل واقعی وجود ندارد، خودرو نباید U-turn کند.
-        // آن را از Traffic آزاد می‌کنیم تا دوباره از Spawn وارد شهر شود.
+      if (transitioned) {
+        return;
+      }
+
+      /**
+       * اگر Transition در این Frame پیدا نشد،
+       * خودرو تا رسیدن واقعی به انتهای Road
+       * همچنان Lifecycle عادی خود را حفظ می‌کند.
+       *
+       * به محض رسیدن به انتهای واقعی Road، Recycle
+       * تلاش می‌شود. اگر خودرو هنوز داخل دید Camera
+       * باشد، recycleVehicle آن را Pending نگه می‌دارد
+       * تا Teleport جلوی چشم کاربر انجام نشود.
+       */
+      const hardEndDistance = 0.05;
+
+      if (remaining <= hardEndDistance) {
         const index = this.activeVehicles.indexOf(active);
+
         if (index >= 0) {
           this.recycleVehicle(index);
         }
@@ -1815,86 +2899,73 @@ export default class CarManager {
   }
 
   /**
-   * ==========================================
-   * Road Transition
-   * ==========================================
-   */
+
+==========================================
+
+Road Transition
+
+==========================================
+*/
 
   private tryStartRoadTransition(
     active: ActiveVehicleData,
     movingPositive: boolean,
   ): boolean {
-    const candidates =
-      this.findConnectedRoads(
-        active.road,
-        movingPositive,
-        active.vehicle.getDirection(),
-      );
+    const candidates = this.findConnectedRoads(
+      active.road,
+      movingPositive,
+      active.vehicle.getDirection(),
+    );
 
     if (candidates.length === 0) {
       return false;
     }
 
-    const selected =
-      this.selectConnectedRoad(
-        candidates,
-        active.vehicle.getDirection(),
-      );
+    const selected = this.selectConnectedRoad(
+      candidates,
+      active.vehicle.getDirection(),
+    );
 
     if (!selected) {
       return false;
     }
 
-    const nextDirection =
-      this.getDirectionForEndpoint(
-        selected.road,
-        selected.endpointIsMin,
-      );
-
-    const nextLaneIndex =
-      this.getLaneIndexForDirection(
-        selected.road,
-        nextDirection,
-      );
-
-    const nextDistance =
-      selected.endpointIsMin
-        ? selected.road.getLongitudinalMin() +
-          CarManager.TRANSITION_EXIT_DISTANCE
-        : selected.road.getLongitudinalMax() -
-          CarManager.TRANSITION_EXIT_DISTANCE;
-
-    const start =
-      active.vehicle.group.position.clone();
-
-    const end =
-      this.getVehicleWorldPosition(
-        selected.road,
-        nextLaneIndex,
-        nextDistance,
-      );
-
-    const control =
-      this.createTransitionControlPoint(
-        selected.connectionPoint,
-        active.vehicle.getDirection(),
-        nextDirection,
-      );
-
-    const distance =
-      start.distanceTo(end);
-
-    const duration = Math.max(
-      CarManager.MIN_TRANSITION_DURATION,
-      Math.min(
-        CarManager.MAX_TRANSITION_DURATION,
-        distance /
-          Math.max(
-            active.motionSpeed,
-            CarManager.MIN_SPEED,
-          ),
-      ),
+    const nextDirection = this.getDirectionForEndpoint(
+      selected.road,
+      selected.endpointIsMin,
     );
+
+    const nextLaneIndex = this.getLaneIndexForDirection(
+      selected.road,
+      nextDirection,
+    );
+
+    const nextDistance = selected.endpointIsMin
+      ? selected.road.getLongitudinalMin() + CarManager.TRANSITION_EXIT_DISTANCE
+      : selected.road.getLongitudinalMax() -
+        CarManager.TRANSITION_EXIT_DISTANCE;
+
+    const start = active.vehicle.group.position.clone();
+
+    const end = this.getVehicleWorldPosition(
+      selected.road,
+      nextLaneIndex,
+      nextDistance,
+    );
+
+    const control = this.createTransitionControlPoint(
+      selected.connectionPoint,
+      active.vehicle.getDirection(),
+      nextDirection,
+    );
+
+    const arcLengthSamples = this.createTransitionArcLengthSamples(
+      start,
+      control,
+      end,
+    );
+    const arcLength =
+      arcLengthSamples[arcLengthSamples.length - 1] ?? start.distanceTo(end);
 
     active.trafficTransition = {
       fromRoad: active.road,
@@ -1906,24 +2977,27 @@ export default class CarManager {
       end: end.clone(),
       finalDirection: nextDirection,
       finalDistance: nextDistance,
-      elapsed: 0,
-      duration,
+      distanceTravelled: 0,
+      arcLength,
+      arcLengthSamples,
+      blockedLastFrame: false,
     };
 
-    // Transition با Bezier جداگانه حرکت می‌کند؛ فقط سرعت داخلی Vehicle
-    // را برای Animation به صفر نزدیک می‌کنیم و خود Transform توسط
-    // updateTransition کنترل می‌شود.
-    active.targetSpeed = 0;
-    active.vehicle.setTargetSpeed(0);
+    active.targetSpeed = active.cruiseSpeed;
+
+    active.vehicle.setTargetSpeed(active.cruiseSpeed);
 
     return true;
   }
 
   /**
-   * ==========================================
-   * Find Connected Roads
-   * ==========================================
-   */
+
+==========================================
+
+Find Connected Roads
+
+==========================================
+*/
 
   private findConnectedRoads(
     fromRoad: Road,
@@ -1944,28 +3018,42 @@ export default class CarManager {
       ? fromRoad.getLongitudinalMax()
       : fromRoad.getLongitudinalMin();
 
-    // اتصال باید از همان Lane فعلی سنجیده شود؛ Lane صفر برای همه خودروها غلط است.
     const fromLane = this.getLaneIndexForDirection(fromRoad, currentDirection);
+
     const sourcePoint = this.getVehicleWorldPosition(
-      fromRoad, fromLane, endpointDistance,
+      fromRoad,
+      fromLane,
+      endpointDistance,
     ).clone();
 
     for (const road of this.roads) {
-      if (road === fromRoad) continue;
+      if (road === fromRoad) {
+        continue;
+      }
 
       for (const endpointIsMin of [true, false]) {
         const nextDirection = this.getDirectionForEndpoint(road, endpointIsMin);
-        if (this.isUTurn(currentDirection, nextDirection)) continue;
+
+        if (this.isUTurn(currentDirection, nextDirection)) {
+          continue;
+        }
 
         const nextLane = this.getLaneIndexForDirection(road, nextDirection);
+
         const endpointDistance = endpointIsMin
           ? road.getLongitudinalMin()
           : road.getLongitudinalMax();
+
         const endpointPoint = this.getVehicleWorldPosition(
-          road, nextLane, endpointDistance,
+          road,
+          nextLane,
+          endpointDistance,
         ).clone();
 
-        if (sourcePoint.distanceTo(endpointPoint) <= CarManager.ROAD_CONNECTION_DISTANCE) {
+        if (
+          sourcePoint.distanceTo(endpointPoint) <=
+          CarManager.ROAD_CONNECTION_DISTANCE
+        ) {
           candidates.push({
             road,
             endpointIsMin,
@@ -1979,10 +3067,13 @@ export default class CarManager {
   }
 
   /**
-   * ==========================================
-   * Select Connected Road
-   * ==========================================
-   */
+
+==========================================
+
+Select Connected Road
+
+==========================================
+*/
 
   private selectConnectedRoad(
     candidates: Array<{
@@ -1996,55 +3087,26 @@ export default class CarManager {
     endpointIsMin: boolean;
     connectionPoint: THREE.Vector3;
   } | null {
-    if (candidates.length === 0) {
-      return null;
-    }
-
-    const straightCandidates =
-      candidates.filter(
-        (candidate) => {
-          const direction =
-            this.getDirectionForEndpoint(
-              candidate.road,
-              candidate.endpointIsMin,
-            );
-
-          return this.isSameAxis(
-            currentDirection,
-            direction,
-          );
-        },
-      );
-
-    if (
-      straightCandidates.length > 0 &&
-      Math.random() < 0.55
-    ) {
-      const index = Math.floor(
-        Math.random() *
-          straightCandidates.length,
-      );
-
-      return (
-        straightCandidates[index] ??
-        null
-      );
-    }
-
-    const index = Math.floor(
-      Math.random() * candidates.length,
+    // Experimental traffic is straight-through only. Never fall back to turns or U-turns.
+    return (
+      candidates.find(
+        (candidate) =>
+          this.getDirectionForEndpoint(
+            candidate.road,
+            candidate.endpointIsMin,
+          ) === currentDirection,
+      ) ?? null
     );
-
-    return candidates[index] ?? null;
   }
 
   /**
-   * ==========================================
-   * Endpoint Direction
-   * ==========================================
-   *
-   * جهت‌ها دقیقاً حفظ شده‌اند.
-   */
+
+==========================================
+
+Endpoint Direction
+
+==========================================
+*/
 
   private getDirectionForEndpoint(
     road: Road,
@@ -2053,289 +3115,514 @@ export default class CarManager {
     const worldDirection = road.getWorldDirection();
     const horizontal = Math.abs(worldDirection.x) >= Math.abs(worldDirection.z);
 
+    // This is the direction entering the Road from the selected endpoint.
     if (horizontal) {
-      // getWorldDirection() جهت +Z محلی Road را نشان می‌دهد.
-      // اگر +Z محلی به سمت +X باشد، min=-X (west) و max=+X (east) است.
-      // اگر +Z محلی به سمت -X باشد، این دو برعکس می‌شوند.
       if (worldDirection.x >= 0) {
-        return endpointIsMin
-          ? "west"
-          : "east";
+        return endpointIsMin ? "east" : "west";
       }
-
-      return endpointIsMin
-        ? "east"
-        : "west";
+      return endpointIsMin ? "west" : "east";
     }
 
-    // در محور عمودی، +Z محلی اگر به سمت +Z جهانی باشد:
-    // min=-Z => north و max=+Z => south.
     if (worldDirection.z >= 0) {
-      return endpointIsMin
-        ? "north"
-        : "south";
+      return endpointIsMin ? "south" : "north";
     }
-
-    return endpointIsMin
-      ? "south"
-      : "north";
+    return endpointIsMin ? "north" : "south";
   }
 
   /**
-   * ==========================================
-   * Lane Index From Direction
-   * ==========================================
-   */
+
+==========================================
+
+Lane Index From Direction
+
+==========================================
+*/
 
   private getLaneIndexForDirection(
     road: Road,
     direction: VehicleDirection,
   ): number {
     const worldDirection = road.getWorldDirection();
+
     const horizontal = Math.abs(worldDirection.x) >= Math.abs(worldDirection.z);
 
     if (horizontal) {
-      return direction === "east"
-        ? 0
-        : 1;
+      return direction === "east" ? 0 : 1;
     }
 
-    return direction === "north"
-      ? 0
-      : 1;
+    return direction === "north" ? 0 : 1;
   }
 
   /**
-   * ==========================================
-   * Direction From Road
-   * ==========================================
-   */
 
-  private getDirectionForRoad(
-    road: Road,
-    laneIndex: number,
-  ): VehicleDirection {
+==========================================
+
+Direction From Road
+
+==========================================
+*/
+
+  private getDirectionForRoad(road: Road, laneIndex: number): VehicleDirection {
     const worldDirection = road.getWorldDirection();
+
     const horizontal = Math.abs(worldDirection.x) >= Math.abs(worldDirection.z);
 
     if (horizontal) {
-      return laneIndex === 0
-        ? "east"
-        : "west";
+      return laneIndex === 0 ? "east" : "west";
     }
 
-    return laneIndex === 0
-      ? "north"
-      : "south";
+    return laneIndex === 0 ? "north" : "south";
   }
 
   /**
-   * ==========================================
-   * Transition Control Point
-   * ==========================================
-   */
+
+==========================================
+
+Transition Control Point
+
+==========================================
+*/
 
   private createTransitionControlPoint(
     connectionPoint: THREE.Vector3,
     incomingDirection: VehicleDirection,
     outgoingDirection: VehicleDirection,
   ): THREE.Vector3 {
-    this.setDirectionVector(
-      incomingDirection,
-      this.tempIncoming,
-    );
+    this.setDirectionVector(incomingDirection, this.tempIncoming);
 
-    this.setDirectionVector(
-      outgoingDirection,
-      this.tempOutgoing,
-    );
+    this.setDirectionVector(outgoingDirection, this.tempOutgoing);
 
-    /**
-     * U-Turn.
-     */
-    if (
-      this.tempIncoming.dot(
-        this.tempOutgoing,
-      ) < -0.9
-    ) {
-      this.tempControl
-        .copy(connectionPoint)
-        .addScaledVector(
-          this.tempIncoming,
-          -CarManager.TURN_RADIUS,
-        );
+    const directionDot = this.tempIncoming.dot(this.tempOutgoing);
 
-      return this.tempControl;
+    // مسیر مستقیم باید نقطه کنترل روی همان خط داشته باشد.
+    // از نصف شدن مختصات جهانی connectionPoint جلوگیری می‌کنیم.
+    if (directionDot > 0.9) {
+      return this.tempControl.copy(connectionPoint);
     }
 
-    this.tempControl
-      .copy(connectionPoint)
-      .addScaledVector(
-        this.tempIncoming,
-        CarManager.TURN_RADIUS,
-      )
-      .addScaledVector(
-        this.tempOutgoing,
-        CarManager.TURN_RADIUS,
-      )
-      .multiplyScalar(0.5);
+    if (directionDot < -0.9) {
+      return this.tempControl
+        .copy(connectionPoint)
+        .addScaledVector(this.tempIncoming, -CarManager.TURN_RADIUS);
+    }
 
-    return this.tempControl;
+    // فقط برای تغییر جهت، نقطه کنترل منحنی ساخته می‌شود.
+    return this.tempControl
+      .copy(connectionPoint)
+      .addScaledVector(this.tempIncoming, CarManager.TURN_RADIUS)
+      .addScaledVector(this.tempOutgoing, CarManager.TURN_RADIUS);
   }
 
   /**
-   * ==========================================
-   * Update Transition
-   * ==========================================
-   */
 
-  private updateTransition(
+==========================================
+
+Transition Collision Guard
+
+==========================================
+
+Transition دیگر بدون بررسی برخورد جلو نمی‌رود.
+
+نکته مهم:
+
+- مسیر منحنی Transition با Follow معمولی Road یکی نیست.
+- بنابراین Collision Guard عادیِ Road به‌تنهایی برای این بخش کافی نیست.
+- قبل از ثبت موقعیت جدید، نقطه بعدی Transition با خودروهای دیگر
+  مقایسه می‌شود.
+- اگر خودرو دیگری خیلی نزدیک باشد، Transition همان Frame متوقف می‌شود
+  و در Frame بعد دوباره تلاش می‌کند.
+- برای جلوگیری از Deadlock بین دو Transition هم‌زمان، وقتی هر دو
+  Transition در محدوده برخورد باشند، ترتیب activeVehicles تعیین می‌کند
+  کدام خودرو عبور کند.
+*/
+  private isTransitionMovementBlocked(
     active: ActiveVehicleData,
+    nextPosition: THREE.Vector3,
     deltaTime: number,
-  ): void {
-    const transition =
-      active.trafficTransition;
+  ): boolean {
+    const transition = active.trafficTransition;
+    if (!transition) {
+      return false;
+    }
+
+    const activeIndex = this.activeVehicles.indexOf(active);
+    const predictionTime = Math.min(
+      Math.max(deltaTime, 0),
+      CarManager.VEHICLE_PREDICTION_TIME,
+    );
+
+    for (const other of this.activeVehicles) {
+      if (other === active) {
+        continue;
+      }
+
+      // یک خودرو که روی مسیر متعارض پشت چراغ قرمز ایستاده، نباید حرکت سبز را قفل کند.
+      if (this.shouldIgnoreRedApproachForTransition(active, other)) {
+        continue;
+      }
+
+      // خودروهای مسیر عادی در لاین مجاور همان خیابان، مخصوصاً در جهت مخالف،
+      // مانع Transition نیستند؛ بررسی فاصلهٔ صرفاً سه‌بعدی باعث ترمز کاذب می‌شود.
+      if (!other.trafficTransition) {
+        const sameFromRoad = other.road === transition.fromRoad;
+        const sameToRoad = other.road === transition.toRoad;
+        const transitionLane = sameToRoad
+          ? transition.toLaneIndex
+          : transition.fromLaneIndex;
+
+        if (
+          (sameFromRoad || sameToRoad) &&
+          other.laneIndex !== transitionLane
+        ) {
+          continue;
+        }
+      }
+
+      const otherPosition = other.vehicle.group.position;
+      this.tempOtherPredictedPosition.copy(otherPosition);
+
+      if (!other.trafficTransition && other.motionSpeed > 0.001) {
+        this.setDirectionVector(
+          other.vehicle.getDirection(),
+          this.tempOtherDirection,
+        );
+        this.tempOtherPredictedPosition.addScaledVector(
+          this.tempOtherDirection,
+          other.motionSpeed * predictionTime,
+        );
+      }
+
+      const currentDistance =
+        active.vehicle.group.position.distanceTo(otherPosition);
+      const predictedDistance = nextPosition.distanceTo(
+        this.tempOtherPredictedPosition,
+      );
+
+      if (
+        predictedDistance >= CarManager.VEHICLE_COLLISION_DISTANCE ||
+        predictedDistance + 0.015 >= currentDistance
+      ) {
+        continue;
+      }
+
+      if (other.trafficTransition) {
+        const otherIndex = this.activeVehicles.indexOf(other);
+        // فقط یک Transition اجازه پیشروی دارد؛ ترتیب ثابت بن‌بست هم‌زمان را می‌شکند.
+        if (activeIndex >= 0 && otherIndex >= 0 && activeIndex < otherIndex) {
+          continue;
+        }
+      }
+
+      // در بازهٔ بازیابی، خودرو با اولویت می‌تواند از کنار خودروی ثابتِ معطل عبور کند.
+      if (
+        active.intersectionReleaseTime > 0 &&
+        !other.trafficTransition &&
+        other.waitingAtIntersection &&
+        other.motionSpeed <= 0.5
+      ) {
+        continue;
+      }
+
+      return true;
+    }
+
+    return false;
+  }
+
+  private shouldIgnoreRedApproachForTransition(
+    active: ActiveVehicleData,
+    other: ActiveVehicleData,
+  ): boolean {
+    const transition = active.trafficTransition;
+    if (
+      !transition ||
+      other.trafficTransition ||
+      !other.waitingAtIntersection ||
+      other.motionSpeed > 0.5 ||
+      !this.isTrafficLightBlocking(other)
+    ) {
+      return false;
+    }
+
+    const phase = this.getTrafficLightPhase(active);
+    if (!phase) {
+      return false;
+    }
+
+    const greenForActive =
+      this.getTrafficLightStateForVehicle(active) === "green";
+
+    if (!greenForActive) {
+      return false;
+    }
+
+    const otherApproach = this.getIntersectionApproachInfo(other);
+    if (!otherApproach) {
+      return false;
+    }
+
+    const distanceToTransition = Math.min(
+      transition.start.distanceTo(otherApproach.connectionPoint),
+      transition.control.distanceTo(otherApproach.connectionPoint),
+      transition.end.distanceTo(otherApproach.connectionPoint),
+    );
+
+    return distanceToTransition <= 9;
+  }
+
+  /**
+
+==========================================
+
+Update Transition
+
+==========================================
+*/
+
+  /**
+   * جدول طول قوس منحنی Bezier را می‌سازد.
+   * نمونه‌ها با فاصله پارامتری مساوی‌اند و طول تجمعی آن‌ها برای حرکت با سرعت واقعی استفاده می‌شود.
+   */
+  private createTransitionArcLengthSamples(
+    start: THREE.Vector3,
+    control: THREE.Vector3,
+    end: THREE.Vector3,
+  ): number[] {
+    const sampleCount = CarManager.TRANSITION_ARC_LENGTH_SAMPLES;
+    const samples = new Array<number>(sampleCount + 1);
+    const previousPoint = start.clone();
+    const currentPoint = new THREE.Vector3();
+    let cumulativeLength = 0;
+
+    samples[0] = 0;
+
+    for (let index = 1; index <= sampleCount; index++) {
+      const t = index / sampleCount;
+      const oneMinusT = 1 - t;
+
+      currentPoint
+        .copy(start)
+        .multiplyScalar(oneMinusT * oneMinusT)
+        .addScaledVector(control, 2 * oneMinusT * t)
+        .addScaledVector(end, t * t);
+
+      cumulativeLength += currentPoint.distanceTo(previousPoint);
+      samples[index] = cumulativeLength;
+      previousPoint.copy(currentPoint);
+    }
+
+    return samples;
+  }
+
+  /** مسافت طی‌شده روی قوس را به پارامتر t منحنی Bezier تبدیل می‌کند. */
+  private getTransitionParameterAtDistance(
+    transition: TrafficTransition,
+    distance: number,
+  ): number {
+    const samples = transition.arcLengthSamples;
+    const finalIndex = samples.length - 1;
+
+    if (finalIndex <= 0 || distance <= 0) {
+      return 0;
+    }
+
+    if (distance >= transition.arcLength) {
+      return 1;
+    }
+
+    let upperIndex = 1;
+    while (
+      upperIndex < finalIndex &&
+      (samples[upperIndex] ?? transition.arcLength) < distance
+    ) {
+      upperIndex++;
+    }
+
+    const lowerIndex = upperIndex - 1;
+    const lowerDistance = samples[lowerIndex] ?? 0;
+    const upperDistance = samples[upperIndex] ?? transition.arcLength;
+    const segmentLength = upperDistance - lowerDistance;
+    const segmentAlpha =
+      segmentLength > 0.000001 ? (distance - lowerDistance) / segmentLength : 0;
+
+    return (
+      (lowerIndex + THREE.MathUtils.clamp(segmentAlpha, 0, 1)) / finalIndex
+    );
+  }
+
+  private updateTransition(active: ActiveVehicleData, deltaTime: number): void {
+    const transition = active.trafficTransition;
 
     if (!transition) {
       return;
     }
 
-    transition.elapsed += deltaTime;
-
-    const progress = Math.min(
-      1,
-      transition.elapsed /
-        transition.duration,
+    const dt = THREE.MathUtils.clamp(
+      Number.isFinite(deltaTime) ? deltaTime : 0,
+      0,
+      0.1,
     );
 
-    /**
-     * Smoothstep.
-     */
-    const smoothProgress =
-      progress *
-      progress *
-      (3 - 2 * progress);
+    const totalLength = Math.max(transition.arcLength, 0.001);
 
-    /**
-     * حرکت روی منحنی درجه دو Bézier؛ به جای lerp مستقیم،
-     * مسیر واقعی پیچ را دنبال می‌کنیم تا خودرو از وسط تقاطع عبور کند.
-     */
-    const t = smoothProgress;
+    // پیشرفت مسیر بر اساس سرعت واقعی خودروست، نه مدت‌زمان ثابت و smoothstep.
+    // بنابراین شتاب و ترمز فقط از یک منبع (motionSpeed) می‌آیند.
+    const nextDistanceTravelled = Math.min(
+      totalLength,
+      transition.distanceTravelled + Math.max(0, active.motionSpeed) * dt,
+    );
+
+    const t = this.getTransitionParameterAtDistance(
+      transition,
+      nextDistanceTravelled,
+    );
     const oneMinusT = 1 - t;
-    this.tempWorldPosition
+
+    this.tempTransitionCandidatePosition
       .copy(transition.start)
       .multiplyScalar(oneMinusT * oneMinusT)
       .addScaledVector(transition.control, 2 * oneMinusT * t)
       .addScaledVector(transition.end, t * t);
 
-    active.vehicle.group.position.copy(
-      this.tempWorldPosition,
-    );
-
-    active.vehicle.group.position.y =
-      CarManager.VEHICLE_Y;
-
     /**
-     * جهت مدل.
+     * ======================================
+     * Transition Collision Guard
+     * ======================================
+     *
+     * مهم: Transition قبلاً بدون هیچ بررسی Collision حرکت می‌کرد.
+     * همین باعث می‌شد دو خودرو هنگام عبور از منحنی وارد هم شوند.
      */
+    if (
+      this.isTransitionMovementBlocked(
+        active,
+        this.tempTransitionCandidatePosition,
+        deltaTime,
+      )
+    ) {
+      transition.blockedLastFrame = true;
+      return;
+    }
+
+    // پس از بازشدن مسیر، حرکت از سرعت فعلی و با شتاب مجاز ادامه پیدا می‌کند.
+    transition.blockedLastFrame = false;
+
+    // فقط بعد از عبور موفق از Collision Guard، مسافت Transition جلو می‌رود.
+    transition.distanceTravelled = nextDistanceTravelled;
+
+    active.vehicle.group.position.copy(this.tempTransitionCandidatePosition);
+
+    active.vehicle.group.position.y = CarManager.VEHICLE_Y;
+
     this.tempDirection
       .copy(transition.control)
       .sub(transition.start)
       .multiplyScalar(2 * (1 - t))
       .add(
-        this.tempOutgoing.copy(transition.end).sub(transition.control).multiplyScalar(2 * t),
+        this.tempOutgoing
+          .copy(transition.end)
+          .sub(transition.control)
+          .multiplyScalar(2 * t),
       );
 
     this.tempDirection.y = 0;
 
-    if (
-      this.tempDirection.lengthSq() >
-      0.0001
-    ) {
+    if (this.tempDirection.lengthSq() > 0.0001) {
       this.tempDirection.normalize();
 
+      const targetRotation = Math.atan2(
+        this.tempDirection.x,
+        this.tempDirection.z,
+      );
+      const currentRotation = active.vehicle.group.rotation.y;
+      const rotationDifference = Math.atan2(
+        Math.sin(targetRotation - currentRotation),
+        Math.cos(targetRotation - currentRotation),
+      );
+      const rotationAlpha = 1 - Math.exp(-12 * Math.max(0, deltaTime));
+
       active.vehicle.group.rotation.y =
-        Math.atan2(
-          this.tempDirection.x,
-          this.tempDirection.z,
-        );
+        currentRotation + rotationDifference * rotationAlpha;
     }
 
-    /**
-     * پایان Transition.
-     */
-    if (progress >= 1) {
+    if (nextDistanceTravelled >= totalLength - 0.001) {
       this.finishTransition(active);
     }
   }
 
   /**
-   * ==========================================
-   * Finish Transition
-   * ==========================================
-   */
 
-  private finishTransition(
-    active: ActiveVehicleData,
-  ): void {
-    const transition =
-      active.trafficTransition;
+==========================================
+
+Finish Transition
+
+==========================================
+*/
+
+  private finishTransition(active: ActiveVehicleData): void {
+    const transition = active.trafficTransition;
 
     if (!transition) {
       return;
     }
 
-    active.road =
-      transition.toRoad;
+    /**
+     * ======================================
+     * تثبیت کامل خودرو روی Road مقصد
+     * ======================================
+     *
+     * ابتدا Road و Lane مقصد ثبت می‌شوند، سپس Transition بسته می‌شود.
+     * ترتیب مهم است: تا وقتی Transition باز است، خودرو هنوز بین دو Road
+     * قرار دارد و نباید منطق عادی Road Progress روی آن اجرا شود.
+     */
+    active.road = transition.toRoad;
 
-    active.laneIndex =
-      transition.toLaneIndex;
-
-    active.roadDistance =
-      transition.finalDistance;
+    active.laneIndex = transition.toLaneIndex;
 
     active.trafficTransition = null;
 
-    /**
-     * Direction mapping فعلی.
-     */
-    active.vehicle.setDirection(
-      transition.finalDirection,
-    );
+    this.pendingRecycleVehicles.delete(active);
 
-    active.vehicle.group.position.copy(
-      transition.end,
-    );
-
-    active.vehicle.group.position.y =
-      CarManager.VEHICLE_Y;
+    active.vehicle.setDirection(transition.finalDirection);
 
     /**
-     * تایمر تقاطع Road جدید.
+     * نقطه پایانی Transition دقیقاً نقطه‌ای است که برای Road مقصد
+     * محاسبه شده است. آن را دوباره روی Vehicle اعمال می‌کنیم تا هیچ
+     * خطای کوچک ناشی از محاسبات منحنی باقی نماند.
      */
+    active.vehicle.group.position.copy(transition.end);
+
+    active.vehicle.group.position.y = CarManager.VEHICLE_Y;
+
+    /**
+     * Road Distance را از موقعیت واقعی Vehicle دوباره محاسبه می‌کنیم.
+     * این کار باعث می‌شود state داخلی CarManager دقیقاً با موقعیت سه‌بعدی
+     * خودرو یکی باشد و Frame بعدی Transition/Recycle را اشتباه تشخیص ندهد.
+     */
+    this.tempLocalPosition.copy(active.vehicle.group.position);
+
+    active.road.group.worldToLocal(this.tempLocalPosition);
+
+    active.roadDistance = this.tempLocalPosition.z;
+
     active.intersectionWaitTime = 0;
 
     active.waitingAtIntersection = false;
 
-    /**
-     * ادامه حرکت با همان Cruise Speed.
-     *
-     * سرعت تصادفی جدید در هر تقاطع باعث تغییر ناگهانی ریتم Traffic
-     * می‌شد؛ بنابراین سرعت طبیعی خودرو در طول عمر آن حفظ می‌شود.
-     */
+    active.intersectionReleaseTime = 0;
+
     active.targetSpeed = active.cruiseSpeed;
-    active.vehicle.setTargetSpeed(
-      active.motionSpeed,
-    );
+
+    active.vehicle.setTargetSpeed(active.motionSpeed);
   }
 
   /**
-   * ==========================================
-   * Direction Vector
-   * ==========================================
-   *
-   * این mapping عمداً تغییر نکرده است.
-   */
+
+==========================================
+
+Direction Vector
+
+==========================================
+*/
 
   private setDirectionVector(
     direction: VehicleDirection,
@@ -2345,12 +3632,10 @@ export default class CarManager {
 
     switch (direction) {
       case "north":
-        // Vehicle به سمت -Z حرکت می‌کند.
         target.z = -1;
         break;
 
       case "south":
-        // Vehicle به سمت +Z حرکت می‌کند.
         target.z = 1;
         break;
 
@@ -2365,73 +3650,67 @@ export default class CarManager {
   }
 
   /**
-   * ==========================================
-   * Moving Positive
-   * ==========================================
-   */
 
-  private isMovingPositive(
-    direction: VehicleDirection,
-  ): boolean {
-    // جهت‌هایی که روی محور طولی محلی Road به سمت +Z حرکت می‌کنند.
-    // north در Vehicle.ts به سمت -Z حرکت می‌کند، بنابراین مثبت نیست.
-    return (
-      direction === "south" ||
-      direction === "east"
-    );
+==========================================
+
+Moving Positive
+
+==========================================
+*/
+
+  private isMovingPositive(direction: VehicleDirection): boolean {
+    return direction === "south" || direction === "east";
   }
 
   /**
-   * ==========================================
-   * U-Turn Detection
-   * ==========================================
-   */
+
+==========================================
+
+U-Turn Detection
+
+==========================================
+*/
 
   private isUTurn(
     incoming: VehicleDirection,
     outgoing: VehicleDirection,
   ): boolean {
     return (
-      (incoming === "north" &&
-        outgoing === "south") ||
-      (incoming === "south" &&
-        outgoing === "north") ||
-      (incoming === "east" &&
-        outgoing === "west") ||
-      (incoming === "west" &&
-        outgoing === "east")
+      (incoming === "north" && outgoing === "south") ||
+      (incoming === "south" && outgoing === "north") ||
+      (incoming === "east" && outgoing === "west") ||
+      (incoming === "west" && outgoing === "east")
     );
   }
 
   /**
-   * ==========================================
-   * Same Axis
-   * ==========================================
-   */
+
+==========================================
+
+Same Axis
+
+==========================================
+*/
 
   private isSameAxis(
     first: VehicleDirection,
     second: VehicleDirection,
   ): boolean {
-    const firstHorizontal =
-      first === "east" ||
-      first === "west";
+    const firstHorizontal = first === "east" || first === "west";
 
-    const secondHorizontal =
-      second === "east" ||
-      second === "west";
+    const secondHorizontal = second === "east" || second === "west";
 
-    return (
-      firstHorizontal ===
-      secondHorizontal
-    );
+    return firstHorizontal === secondHorizontal;
   }
 
   /**
-   * ==========================================
-   * Random Vehicle Type
-   * ==========================================
-   */
+
+==========================================
+
+Random Vehicle Type
+
+==========================================
+*/
 
   private getRandomVehicleType(): VehicleModelType {
     let totalWeight = 0;
@@ -2440,8 +3719,7 @@ export default class CarManager {
       totalWeight += profile.weight;
     }
 
-    let random =
-      Math.random() * totalWeight;
+    let random = Math.random() * totalWeight;
 
     for (const profile of this.vehicleProfiles) {
       random -= profile.weight;
@@ -2451,87 +3729,120 @@ export default class CarManager {
       }
     }
 
-    const fallback =
-      this.vehicleProfiles[
-        this.vehicleProfiles.length - 1
-      ];
+    const fallback = this.vehicleProfiles[this.vehicleProfiles.length - 1];
 
-    return fallback
-      ? fallback.type
-      : "sedan";
+    return fallback ? fallback.type : "sedan";
   }
 
   /**
-   * ==========================================
-   * Random Speed
-   * ==========================================
-   */
+
+==========================================
+
+Random Speed
+
+==========================================
+*/
 
   private getRandomSpeed(): number {
     return (
       CarManager.MIN_SPEED +
-      Math.random() *
-        (CarManager.MAX_SPEED -
-          CarManager.MIN_SPEED)
+      Math.random() * (CarManager.MAX_SPEED - CarManager.MIN_SPEED)
     );
   }
 
   /**
-   * ==========================================
-   * Recycle Vehicle
-   * ==========================================
-   *
-   * Recycle در Traffic به معنی حذف و Spawn مجدد نیست.
-   * همان Vehicle فعال مستقیماً به یک نقطه امن و خارج از دید دوربین
-   * منتقل می‌شود و همان‌جا دوباره حرکت خود را ادامه می‌دهد.
-   *
-   * این ترتیب باعث می‌شود:
-   * - activeVehicles هیچ‌وقت برای Recycle کم نشود.
-   * - Vehicle هرگز برای Recycle مخفی نشود.
-   * - Pool در چرخه عادی Traffic درگیر نشود.
-   * - عمر خودرو وابسته به زمان نباشد؛ فقط پایان Road بدون اتصال باعث Recycle می‌شود.
-   */
+
+==========================================
+
+Recycle Vehicle
+
+==========================================
+*/
+
   private recycleVehicle(index: number): void {
     const active = this.activeVehicles[index];
 
-    if (!active || !this.hasCameraPosition || this.roads.length === 0) {
+    if (!active || this.roads.length === 0) {
       return;
     }
 
-    // اگر قبلاً برای همین خودرو درخواست Recycle ثبت شده، دوباره اجرا نشود.
+    /**
+     * ======================================
+     * Transition Safety Guard
+     * ======================================
+     *
+     * یک خودرو در حالت Transition هنوز بین دو Road قرار دارد
+     * و موقعیت نهایی آن هنوز روی Road مقصد تثبیت نشده است.
+     *
+     * بنابراین Recycle نباید در این لحظه بتواند خودرو را از چرخه
+     * Transition خارج کند یا آن را به یک نقطه دیگر Teleport کند.
+     *
+     * در حالت عادی updateRoadProgress هنگام Transition اجرا نمی‌شود،
+     * اما این Guard عمداً این قرارداد را در خود Recycle نیز حفظ می‌کند
+     * تا Lifecycle خودرو در برابر تغییرات آینده مقاوم بماند.
+     */
+    if (active.trafficTransition) {
+      return;
+    }
+
+    /**
+     * اگر Camera هنوز در دسترس نباشد،
+     * یک نقطه امن روی شبکه پیدا می‌کنیم.
+     * Count خودروها ثابت می‌ماند و Vehicle از Pool خارج نمی‌شود.
+     */
+    if (!this.hasCameraPosition) {
+      const candidate = this.findRecycleCandidateWithoutCamera(active);
+
+      if (candidate) {
+        this.applyRecycleCandidate(active, candidate);
+      } else {
+        this.pendingRecycleVehicles.add(active);
+      }
+
+      return;
+    }
+
+    /**
+     * اگر این خودرو قبلاً Pending شده است،
+     * دوباره همان Frame آن را جابه‌جا نمی‌کنیم.
+     * processPendingRecycles در Frameهای بعدی تصمیم می‌گیرد.
+     */
     if (this.pendingRecycleVehicles.has(active)) {
       return;
     }
 
     /**
-     * بسیار مهم: تا وقتی خود خودرو در محدوده دید دوربین است،
-     * آن را به نقطه دیگری Teleport نمی‌کنیم.
-     *
-     * حتی اگر مقصد جدید کاملاً Off-screen باشد، جابه‌جایی Transform
-     * خودرو در حالی که مبدا روی صفحه دیده می‌شود، از دید کاربر
-     * به شکل ناپدید شدن ناگهانی دیده می‌شود.
+     * هرگز خودرویی که هنوز داخل محدوده امن Camera است
+     * ناگهان به نقطه دیگری Teleport نمی‌کنیم.
      */
-    if (
-      this.isPositionInsideCameraSafetyZone(
-        active.vehicle.group.position,
-      )
-    ) {
+    if (this.isPositionInsideCameraSafetyZone(active.vehicle.group.position)) {
       this.pendingRecycleVehicles.add(active);
-      active.targetSpeed = 0;
-      active.vehicle.setTargetSpeed(0);
+
+      // تا زمان خروج از محدوده دید، حرکت طبیعی خودرو حفظ می‌شود.
+      active.targetSpeed = active.cruiseSpeed;
+
+      active.vehicle.setTargetSpeed(active.cruiseSpeed);
+
       return;
     }
 
-    const candidate =
-      this.findOffscreenRecycleCandidate(
-        this.lastCameraPosition,
-        active,
-      );
+    /**
+     * خودرو از محدوده امن Camera خارج شده است؛
+     * حالا می‌توانیم آن را بدون Pop بصری به یک نقطه امن
+     * دیگر از شبکه منتقل کنیم.
+     */
+    const candidate = this.findOffscreenRecycleCandidate(
+      this.lastCameraPosition,
+      active,
+    );
 
-    // اگر مقصد امن پیدا نشد، ماشین را حذف/مخفی نمی‌کنیم.
-    // تلاش بعدی در Frameهای بعد انجام می‌شود.
     if (!candidate) {
+      /**
+       * اگر در این Frame نقطه مناسبی پیدا نشد،
+       * خودرو حذف نمی‌شود و در Pending باقی می‌ماند.
+       */
       this.pendingRecycleVehicles.add(active);
+
       return;
     }
 
@@ -2539,17 +3850,58 @@ export default class CarManager {
   }
 
   /**
-   * ==========================================
-   * Find Offscreen Recycle Candidate
-   * ==========================================
-   *
-   * تمام Roadهای فعال و هر دو Lane بررسی می‌شوند؛ دیگر برای Recycle
-   * یک Road تصادفی انتخاب نمی‌کنیم. مقصد باید از دوربین دور باشد و
-   * با Traffic موجود تداخل نداشته باشد.
-   */
+
+==========================================
+
+Find Recycle Candidate Without Camera
+
+==========================================
+*/
+
+  private findRecycleCandidateWithoutCamera(
+    ignoredVehicle?: ActiveVehicleData,
+  ): {
+    road: Road;
+    laneIndex: number;
+    direction: VehicleDirection;
+    distance: number;
+  } | null {
+    for (const road of this.roads) {
+      for (const distance of this.getSafeRoadDistances(road)) {
+        for (let laneIndex = 0; laneIndex < Road.LANE_COUNT; laneIndex++) {
+          const direction = this.getDirectionForRoad(road, laneIndex);
+
+          if (
+            this.canSpawnCar(
+              road,
+              laneIndex,
+              direction,
+              distance,
+              ignoredVehicle,
+            )
+          ) {
+            return { road, laneIndex, direction, distance };
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
+
+==========================================
+
+Find Offscreen Recycle Candidate
+
+==========================================
+*/
+
   private findOffscreenRecycleCandidate(
     cameraPosition: THREE.Vector3,
     ignoredVehicle?: ActiveVehicleData,
+    preferNearCamera = false,
   ): {
     road: Road;
     laneIndex: number;
@@ -2557,77 +3909,31 @@ export default class CarManager {
     distance: number;
     cameraDistance: number;
   } | null {
-    const candidates: {
+    const candidates: Array<{
       road: Road;
       laneIndex: number;
       direction: VehicleDirection;
       distance: number;
       cameraDistance: number;
-    }[] = [];
+    }> = [];
 
     for (const road of this.roads) {
-      const min =
-        road.getLongitudinalMin() +
-        CarManager.TRANSITION_EXIT_DISTANCE;
-      const max =
-        road.getLongitudinalMax() -
-        CarManager.TRANSITION_EXIT_DISTANCE;
+      for (const distance of this.getSafeRoadDistances(road)) {
+        for (let laneIndex = 0; laneIndex < Road.LANE_COUNT; laneIndex++) {
+          const direction = this.getDirectionForRoad(road, laneIndex);
+          const position = this.getVehicleWorldPosition(
+            road,
+            laneIndex,
+            distance,
+          ).clone();
+          const cameraDistance = position.distanceTo(cameraPosition);
 
-      /**
-       * فقط به دو سر Road وابسته نیستیم؛ چند نقطه در طول Road بررسی می‌شود.
-       * این کار مخصوصاً بعد از Chunk شدن شهر، احتمال نبودن Spawn معتبر را کم می‌کند.
-       */
-      for (
-        let sampleIndex = 0;
-        sampleIndex < CarManager.SPAWN_POSITION_SAMPLES;
-        sampleIndex++
-      ) {
-        const t =
-          CarManager.SPAWN_POSITION_SAMPLES === 1
-            ? 0.5
-            : sampleIndex /
-              (CarManager.SPAWN_POSITION_SAMPLES - 1);
-
-        const distance =
-          THREE.MathUtils.lerp(min, max, t);
-
-        for (
-          let laneIndex = 0;
-          laneIndex < Road.LANE_COUNT;
-          laneIndex++
-        ) {
-          const direction =
-            this.getDirectionForRoad(
-              road,
-              laneIndex,
-            );
-
-          const position =
-            this.getVehicleWorldPosition(
-              road,
-              laneIndex,
-              distance,
-            );
-
-          const cameraDistance =
-            position.distanceTo(cameraPosition);
-
-          /**
-           * فاصله به‌تنهایی کافی نیست. یک نقطه می‌تواند 42 واحد از دوربین
-           * دور باشد ولی هنوز داخل تصویر دیده شود. چنین نقطه‌ای برای Recycle
-           * ممنوع است، چون انتقال خودرو به آن باعث چشمک/Teleport قابل مشاهده می‌شود.
-           */
-          if (
-            cameraDistance <
-            CarManager.SPAWN_MIN_CAMERA_DISTANCE
-          ) {
+          if (cameraDistance < CarManager.SPAWN_MIN_CAMERA_DISTANCE) {
             continue;
           }
-
           if (this.isPositionInsideCameraSafetyZone(position)) {
             continue;
           }
-
           if (
             !this.canSpawnCar(
               road,
@@ -2655,83 +3961,263 @@ export default class CarManager {
       return null;
     }
 
-    /**
-     * ابتدا مقصدهایی را ترجیح می‌دهیم که داخل بازه ترجیحی 42 تا 72 واحد باشند.
-     * اگر چنین مقصدی نبود، دورترین مقصد معتبر را انتخاب می‌کنیم.
-     */
     const preferred = candidates.filter(
       (candidate) =>
-        candidate.cameraDistance <=
-        CarManager.SPAWN_MAX_CAMERA_DISTANCE,
+        candidate.cameraDistance <= CarManager.SPAWN_MAX_CAMERA_DISTANCE,
     );
+    const pool = preferred.length > 0 ? preferred : candidates;
 
-    const pool =
-      preferred.length > 0
-        ? preferred
-        : candidates;
+    if (preferNearCamera) {
+      pool.sort((a, b) => a.cameraDistance - b.cameraDistance);
+      return pool[0] ?? null;
+    }
 
-    pool.sort(
-      (a, b) =>
-        b.cameraDistance - a.cameraDistance,
-    );
-
-    const topCount = Math.min(
-      6,
-      pool.length,
-    );
-
-    return (
-      pool[
-        Math.floor(Math.random() * topCount)
-      ] ?? null
-    );
+    // Randomize among safe off-screen locations so cars don't accumulate on a single road.
+    return pool[Math.floor(Math.random() * pool.length)] ?? null;
   }
 
   /**
-   * ==========================================
-   * Camera Safety Check
-   * ==========================================
-   *
-   * بررسی می‌کند که نقطه مقصد داخل Frustum دوربین یا خیلی نزدیک به لبه
-   * تصویر نباشد. حاشیه اضافه عمداً کمی بزرگ‌تر از خود تصویر است تا اگر
-   * خودرو دقیقاً روی لبه صفحه قرار گرفت، Teleport آن دیده نشود.
-   */
-  private isPositionInsideCameraSafetyZone(
-    position: THREE.Vector3,
-  ): boolean {
+
+==========================================
+
+Camera Safety Check
+
+==========================================
+*/
+
+  private isPositionInsideCameraSafetyZone(position: THREE.Vector3): boolean {
     if (!this.camera) {
-      // اگر Camera هنوز ثبت نشده، حداقل بررسی فاصله انجام شده است.
       return false;
     }
 
-    this.tempProjectedPosition
-      .copy(position)
-      .project(this.camera);
+    this.tempProjectedPosition.copy(position).project(this.camera);
 
     const ndc = this.tempProjectedPosition;
 
-    // NDC z خارج از این بازه یعنی نقطه پشت/خارج از عمق قابل نمایش دوربین است.
     if (ndc.z < -1 || ndc.z > 1) {
       return false;
     }
 
-    // حاشیه ایمنی بیشتر از 1 باعث می‌شود نقطه حتی نزدیک لبه تصویر هم نباشد.
     const safetyMargin = 1.18;
 
-    return (
-      Math.abs(ndc.x) <= safetyMargin &&
-      Math.abs(ndc.y) <= safetyMargin
+    return Math.abs(ndc.x) <= safetyMargin && Math.abs(ndc.y) <= safetyMargin;
+  }
+
+  /**
+
+==========================================
+
+Stalled Vehicle Recovery
+
+==========================================
+*/
+
+  /**
+   * Stop behind a valid red light or directly behind a stopped leader is intentional.
+   */
+  private isWaitingForTrafficToMove(active: ActiveVehicleData): boolean {
+    if (active.motionSpeed > 0.15 || active.targetSpeed > 0.15) {
+      return false;
+    }
+
+    if (active.waitingAtIntersection && this.isTrafficLightBlocking(active)) {
+      return true;
+    }
+
+    for (const other of this.activeVehicles) {
+      if (
+        other === active ||
+        other.trafficTransition ||
+        other.road !== active.road ||
+        other.laneIndex !== active.laneIndex
+      ) {
+        continue;
+      }
+
+      const gap = this.getForwardDistance(
+        active.road,
+        active.roadDistance,
+        other.roadDistance,
+        active.vehicle.getDirection(),
+      );
+
+      if (
+        gap > 0 &&
+        gap <= CarManager.FRONT_DETECTION_DISTANCE &&
+        (other.motionSpeed <= 0.2 || other.targetSpeed <= 0.2)
+      ) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * اگر خودرو خارج از میدان دید برای مدت طولانی پیشرفت نکند، همان خودرو
+   * به نقطه‌ای امن از شبکه منتقل می‌شود. تعداد خودروها افزایش پیدا نمی‌کند
+   * و جابه‌جایی فقط خارج از محدودهٔ دید دوربین انجام می‌شود.
+   */
+  private updateVehicleProgressWatchdog(
+    active: ActiveVehicleData,
+    deltaTime: number,
+  ): void {
+    const position = active.vehicle.group.position;
+    const moved =
+      position.distanceToSquared(active.lastProgressPosition) >=
+      CarManager.VEHICLE_PROGRESS_EPSILON * CarManager.VEHICLE_PROGRESS_EPSILON;
+
+    if (moved) {
+      active.lastProgressPosition.copy(position);
+      active.stalledTime = 0;
+      return;
+    }
+
+    // A red light or a stopped car directly ahead is a valid wait, not a deadlock.
+    if (this.isWaitingForTrafficToMove(active)) {
+      active.lastProgressPosition.copy(position);
+      active.stalledTime = 0;
+      return;
+    }
+
+    const safeDelta = THREE.MathUtils.clamp(
+      Number.isFinite(deltaTime) ? deltaTime : 0,
+      0,
+      0.25,
+    );
+    active.stalledTime += safeDelta;
+
+    if (active.stalledTime < CarManager.STALLED_VEHICLE_RECOVERY_SECONDS) {
+      return;
+    }
+
+    if (!this.camera) {
+      return;
+    }
+
+    // خارج از تصویر، همان خودرو را به جایگاهی امن نزدیک دوربین برگردان.
+    if (!this.isPositionInsideCameraSafetyZone(position)) {
+      const candidate = this.findOffscreenRecycleCandidate(
+        this.lastCameraPosition,
+        active,
+        true,
+      );
+
+      if (candidate) {
+        this.applyRecycleCandidate(active, candidate);
+        return;
+      }
+
+      active.stalledTime = Math.max(
+        0,
+        CarManager.STALLED_VEHICLE_RECOVERY_SECONDS -
+          CarManager.STALLED_VEHICLE_RETRY_SECONDS,
+      );
+      return;
+    }
+
+    // خودرو داخل دید دوربین جابه‌جا نمی‌شود؛ فقط به یک خودرو نزدیک اجازه عبور کوتاه می‌دهیم.
+    const hasNearbyRelease = this.activeVehicles.some(
+      (other) =>
+        other !== active &&
+        other.intersectionReleaseTime > 0 &&
+        other.vehicle.group.position.distanceTo(position) < 12,
+    );
+
+    if (hasNearbyRelease || !this.isDeadlockReleaseLeader(active)) {
+      active.stalledTime = Math.max(
+        0,
+        CarManager.STALLED_VEHICLE_RECOVERY_SECONDS -
+          CarManager.STALLED_VEHICLE_RETRY_SECONDS,
+      );
+      return;
+    }
+
+    active.intersectionReleaseTime = CarManager.DEADLOCK_RELEASE_DURATION;
+    active.targetSpeed = Math.min(
+      active.cruiseSpeed,
+      CarManager.DEADLOCK_RELEASE_SPEED,
+    );
+    active.vehicle.setTargetSpeed(active.targetSpeed);
+    active.stalledTime = Math.max(
+      0,
+      CarManager.STALLED_VEHICLE_RECOVERY_SECONDS -
+        CarManager.STALLED_VEHICLE_RETRY_SECONDS,
     );
   }
 
   /**
-   * ==========================================
-   * Apply Recycle Candidate
-   * ==========================================
-   *
-   * همان Vehicle فعال را در مقصد جدید قرار می‌دهد؛ هیچ visible=false،
-   * release یا pop از Pool در این مسیر وجود ندارد.
+   * اولویت بازیابی در یک صف: خودروی جلویی یا نزدیک‌تر به تقاطع زودتر آزاد شود.
+   * این انتخاب باعث نمی‌شود همه خودروهای اطراف هم‌زمان از چراغ عبور کنند.
    */
+  private isDeadlockReleaseLeader(active: ActiveVehicleData): boolean {
+    const activePosition = active.vehicle.group.position;
+    const activeApproach = this.getIntersectionApproachInfo(active);
+    const activeIndex = this.activeVehicles.indexOf(active);
+
+    for (const other of this.activeVehicles) {
+      if (
+        other === active ||
+        other.stalledTime < CarManager.STALLED_VEHICLE_RECOVERY_SECONDS ||
+        other.vehicle.group.position.distanceTo(activePosition) > 12
+      ) {
+        continue;
+      }
+
+      const otherApproach = this.getIntersectionApproachInfo(other);
+      if (
+        activeApproach &&
+        otherApproach &&
+        activeApproach.connectionPoint.distanceTo(
+          otherApproach.connectionPoint,
+        ) <= CarManager.INTERSECTION_MATCH_DISTANCE
+      ) {
+        if (
+          otherApproach.remaining <
+          activeApproach.remaining - CarManager.INTERSECTION_PRIORITY_MARGIN
+        ) {
+          return false;
+        }
+        if (
+          Math.abs(otherApproach.remaining - activeApproach.remaining) <=
+            CarManager.INTERSECTION_PRIORITY_MARGIN &&
+          this.activeVehicles.indexOf(other) < activeIndex
+        ) {
+          return false;
+        }
+        continue;
+      }
+
+      if (other.road === active.road && other.laneIndex === active.laneIndex) {
+        const gap = this.getForwardDistance(
+          active.road,
+          active.roadDistance,
+          other.roadDistance,
+          active.vehicle.getDirection(),
+        );
+        if (gap > 0 && gap < 12) {
+          return false;
+        }
+        continue;
+      }
+
+      // برای بن‌بست‌های مشترک که به یک Lane یا تقاطع تعلق ندارند، ترتیب ثابت حفظ می‌شود.
+      if (this.activeVehicles.indexOf(other) < activeIndex) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  /**
+
+==========================================
+
+Apply Recycle Candidate
+
+==========================================
+*/
   private applyRecycleCandidate(
     active: ActiveVehicleData,
     candidate: {
@@ -2741,58 +4227,52 @@ export default class CarManager {
       distance: number;
     },
   ): void {
-    const position =
-      this.getVehicleWorldPosition(
-        candidate.road,
-        candidate.laneIndex,
-        candidate.distance,
-      );
+    const position = this.getVehicleWorldPosition(
+      candidate.road,
+      candidate.laneIndex,
+      candidate.distance,
+    );
 
     active.road = candidate.road;
+
     active.laneIndex = candidate.laneIndex;
+
     active.roadDistance = candidate.distance;
+
     active.trafficTransition = null;
+
     active.intersectionWaitTime = 0;
+
     active.waitingAtIntersection = false;
 
-    /**
-     * در Recycle از activate() استفاده نمی‌کنیم.
-     *
-     * activate() بخشی از lifecycle اولیه Vehicle است؛ فراخوانی دوباره آن روی
-     * یک Vehicle فعال می‌تواند باعث Reset داخلی مدل، تغییر وضعیت نمایش یا
-     * پرش یک‌فریمی شود. برای Traffic بی‌نهایت فقط Transform و وضعیت حرکت را
-     * منتقل می‌کنیم.
-     */
+    active.intersectionReleaseTime = 0;
+
     active.vehicle.group.position.copy(position);
-    active.vehicle.group.position.y =
-      CarManager.VEHICLE_Y;
 
-    active.vehicle.setDirection(
-      candidate.direction,
-    );
+    active.vehicle.group.position.y = CarManager.VEHICLE_Y;
 
-    /**
-     * Recycle فقط مکان و مسیر را عوض می‌کند.
-     * سرعت طبیعی خودرو حفظ می‌شود تا بعد از Recycle شتاب ناگهانی نگیرد.
-     */
+    active.lastProgressPosition.copy(position);
+    active.stalledTime = 0;
+    active.intersectionReleaseTime = 0;
+
+    active.vehicle.setDirection(candidate.direction);
+
     active.targetSpeed = active.cruiseSpeed;
 
-    active.vehicle.setTargetSpeed(
-      active.motionSpeed,
-    );
+    active.vehicle.setTargetSpeed(active.motionSpeed);
 
-    // Visibility اینجا اصلاً تغییر نمی‌کند؛ Vehicle از ابتدا Active و visible است.
     this.pendingRecycleVehicles.delete(active);
   }
 
   /**
-   * ==========================================
-   * Process Pending Recycles
-   * ==========================================
-   *
-   * فقط زمانی اجرا می‌شود که در تلاش قبلی مقصد امن پیدا نشده باشد.
-   * ماشین در این مدت از active list خارج نمی‌شود و Pool نیز دست‌کاری نمی‌شود.
-   */
+
+==========================================
+
+Process Pending Recycles
+
+==========================================
+*/
+
   private processPendingRecycles(): void {
     if (
       this.roads.length === 0 ||
@@ -2802,59 +4282,52 @@ export default class CarManager {
       return;
     }
 
-    const pending = Array.from(
-      this.pendingRecycleVehicles,
-    );
+    const pending = Array.from(this.pendingRecycleVehicles);
 
     for (const active of pending) {
       if (!this.activeVehicles.includes(active)) {
         this.pendingRecycleVehicles.delete(active);
+
         continue;
       }
 
-      /**
-       * اگر خود خودرو هنوز روی صفحه است، Recycle را عقب می‌اندازیم.
-       * در این حالت updateTrafficState سرعت آن را به صفر نرم می‌کند
-       * تا از انتهای Road عبور نکند و ناگهان ناپدید نشود.
-       */
       if (
-        this.isPositionInsideCameraSafetyZone(
-          active.vehicle.group.position,
-        )
+        this.isPositionInsideCameraSafetyZone(active.vehicle.group.position)
       ) {
-        active.targetSpeed = 0;
-        active.vehicle.setTargetSpeed(0);
+        active.targetSpeed = active.cruiseSpeed;
+
+        active.vehicle.setTargetSpeed(active.cruiseSpeed);
+
         continue;
       }
 
-      const candidate =
-        this.findOffscreenRecycleCandidate(
-          this.lastCameraPosition,
-          active,
-        );
+      const candidate = this.findOffscreenRecycleCandidate(
+        this.lastCameraPosition,
+        active,
+      );
 
       if (!candidate) {
         continue;
       }
 
-      this.applyRecycleCandidate(
-        active,
-        candidate,
-      );
+      this.applyRecycleCandidate(active, candidate);
     }
   }
 
   /**
-   * ==========================================
-   * Release Vehicle
-   * ==========================================
-   */
 
-  private releaseVehicle(
-    index: number,
-  ): void {
-    const active =
-      this.activeVehicles[index];
+==========================================
+
+Release Vehicle
+
+==========================================
+
+
+
+این تابع برای Lifecycle Pool حفظ شده است.
+*/
+  private releaseVehicle(index: number): void {
+    const active = this.activeVehicles[index];
 
     if (!active) {
       return;
@@ -2864,24 +4337,29 @@ export default class CarManager {
 
     active.vehicle.reset();
 
-    active.vehicle.group.visible =
-      false;
+    const fadeMaterials = this.vehicleFadeMaterials.get(active.vehicle);
 
-    this.availableVehicles.push(
-      active.vehicle,
-    );
+    if (fadeMaterials) {
+      for (const material of fadeMaterials) {
+        material.opacity = 1;
+      }
+    }
 
-    this.activeVehicles.splice(
-      index,
-      1,
-    );
+    active.vehicle.group.visible = false;
+
+    this.availableVehicles.push(active.vehicle);
+
+    this.activeVehicles.splice(index, 1);
   }
 
   /**
-   * ==========================================
-   * Stats
-   * ==========================================
-   */
+
+==========================================
+
+Stats
+
+==========================================
+*/
 
   public getStats(): {
     active: number;
@@ -2890,24 +4368,24 @@ export default class CarManager {
     ready: boolean;
   } {
     return {
-      active:
-        this.activeVehicles.length,
+      active: this.activeVehicles.length,
 
-      pooled:
-        this.availableVehicles.length,
+      pooled: this.availableVehicles.length,
 
-      maxActive:
-        CarManager.POOL_SIZE,
+      maxActive: CarManager.POOL_SIZE,
 
       ready: this.initialized,
     };
   }
 
   /**
-   * ==========================================
-   * Dispose
-   * ==========================================
-   */
+
+==========================================
+
+Dispose
+
+==========================================
+*/
 
   public dispose(): void {
     for (const active of this.activeVehicles) {
@@ -2935,6 +4413,7 @@ export default class CarManager {
     this.refillTimer = 0;
 
     this.scene = null;
+
     this.camera = null;
 
     this.vehicleFactory.dispose();
