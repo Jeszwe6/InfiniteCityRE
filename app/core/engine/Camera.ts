@@ -28,7 +28,7 @@ export class Camera {
 
     // دوربین را در ارتفاع مناسب
     // و روی محور Z قرار می‌دهیم.
-    this.instance.position.set(0, 12, 20);
+    this.instance.position.set(0, 12, -20);
 
     // -----------------------------
     // جهت اولیه

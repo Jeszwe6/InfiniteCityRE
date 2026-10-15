@@ -9,6 +9,8 @@ import { World } from "../world/World";
 import CarManager from "../world/CarManager";
 import { Road } from "../world/Road";
 
+import TrafficLightController from "../traffic/TrafficLightController";
+
 /**
  * ==========================================
  * Engine
@@ -19,9 +21,11 @@ import { Road } from "../world/Road";
  * - World
  * - CameraController
  * - Traffic
+ * - Traffic Lights
  *
  * توجه:
- * منطق Road، World، ChunkManager و جهت حرکت خودروها در این فایل تغییر داده نشده است.
+ * منطق Road، World، ChunkManager و حرکت فعلی خودروها
+ * در این مرحله تغییر نکرده است.
  */
 export class Engine {
   public readonly scene: Scene;
@@ -30,6 +34,7 @@ export class Engine {
   public readonly world: World;
 
   private readonly carManager: CarManager;
+  private readonly trafficLightController: TrafficLightController;
   private readonly cameraController: CameraController;
   private readonly clock: THREE.Clock;
 
@@ -57,6 +62,11 @@ export class Engine {
 
     this.renderer = new Renderer();
     this.carManager = new CarManager();
+
+    // چراغ‌ها در یک Group مستقل ساخته می‌شوند تا Road/World دست‌نخورده بمانند.
+    this.trafficLightController = new TrafficLightController(
+      this.scene.instance,
+    );
 
     window.addEventListener("resize", this.handleResize);
   }
@@ -116,6 +126,11 @@ export class Engine {
         currentRoads,
       );
 
+      // چراغ‌ها از همان Road Network استفاده می‌کنند.
+      this.trafficLightController.setRoadNetwork(
+        currentRoads,
+      );
+
       this.registeredRoads = currentRoads;
       this.trafficInitialized = true;
     } finally {
@@ -171,32 +186,27 @@ export class Engine {
 
     const currentRoads = this.collectRoads();
 
-    if (
-      currentRoads.length ===
-      this.registeredRoads.length
-    ) {
-      let networkChanged = false;
+    let networkChanged =
+      currentRoads.length !== this.registeredRoads.length;
 
-      for (
-        let index = 0;
-        index < currentRoads.length;
-        index++
-      ) {
-        if (
-          currentRoads[index] !==
-          this.registeredRoads[index]
-        ) {
+    if (!networkChanged) {
+      for (let index = 0; index < currentRoads.length; index++) {
+        if (currentRoads[index] !== this.registeredRoads[index]) {
           networkChanged = true;
           break;
         }
       }
+    }
 
-      if (!networkChanged) {
-        return;
-      }
+    if (!networkChanged) {
+      return;
     }
 
     this.carManager.setRoadNetwork(
+      currentRoads,
+    );
+
+    this.trafficLightController.setRoadNetwork(
       currentRoads,
     );
 
@@ -235,6 +245,14 @@ export class Engine {
     this.updateRoadNetwork();
 
     if (this.trafficInitialized) {
+      /**
+       * چراغ‌ها مستقل از CarManager آپدیت می‌شوند.
+       * در این مرحله فقط ظاهر/فاز چراغ کنترل می‌شود.
+       */
+      this.trafficLightController.update(
+        deltaTime,
+      );
+
       /**
        * خود Camera به CarManager داده می‌شود تا Spawn/Reposition
        * فقط بر اساس فاصله نباشد و واقعاً خارج از Frustum انجام شود.
@@ -308,6 +326,7 @@ export class Engine {
     this.renderer.instance.dispose();
     this.world.dispose();
     this.carManager.dispose();
+    this.trafficLightController.dispose();
 
     this.registeredRoads = [];
   }

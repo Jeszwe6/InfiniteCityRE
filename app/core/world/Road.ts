@@ -30,14 +30,17 @@ export class Road {
   public static readonly LANE_COUNT = 2;
   public static readonly LANE_WIDTH = 4;
 
-  public static readonly ASPHALT_HALF_WIDTH = Road.WIDTH / 2;
+  public static readonly ASPHALT_HALF_WIDTH =
+    Road.WIDTH / 2;
 
   public static readonly LANE_OFFSET_NEGATIVE = -2;
   public static readonly LANE_OFFSET_POSITIVE = 2;
 
-  public static readonly DRIVING_MIN = -Road.ASPHALT_HALF_WIDTH;
+  public static readonly DRIVING_MIN =
+    -Road.ASPHALT_HALF_WIDTH;
 
-  public static readonly DRIVING_MAX = Road.ASPHALT_HALF_WIDTH;
+  public static readonly DRIVING_MAX =
+    Road.ASPHALT_HALF_WIDTH;
 
   /**
    * اندازه‌ی محدوده‌ی مرکزی چهارراه.
@@ -59,11 +62,15 @@ export class Road {
   private static readonly ROAD_SURFACE_Y = 0.025;
 
   private static readonly CENTER_LINE_LENGTH = 1.8;
+
   private static readonly CENTER_LINE_GAP = 2.0;
+
   private static readonly CENTER_LINE_THICKNESS = 0.006;
 
   private static readonly CENTER_LINE_Y =
-    Road.ROAD_SURFACE_Y + Road.CENTER_LINE_THICKNESS / 2 + 0.0005;
+    Road.ROAD_SURFACE_Y +
+    Road.CENTER_LINE_THICKNESS / 2 +
+    0.0005;
 
   /**
    * ==========================================
@@ -71,11 +78,14 @@ export class Road {
    * ==========================================
    */
 
-  private static roadMaterial: THREE.MeshStandardMaterial | null = null;
+  private static roadMaterial:
+    THREE.MeshStandardMaterial | null = null;
 
-  private static sidewalkMaterial: THREE.MeshStandardMaterial | null = null;
+  private static sidewalkMaterial:
+    THREE.MeshStandardMaterial | null = null;
 
-  private static markingMaterial: THREE.MeshBasicMaterial | null = null;
+  private static markingMaterial:
+    THREE.MeshBasicMaterial | null = null;
 
   /**
    * ==========================================
@@ -83,21 +93,18 @@ export class Road {
    * ==========================================
    */
 
-  private static readonly roadGeometryCache = new Map<
-    string,
-    THREE.PlaneGeometry
-  >();
+  private static readonly roadGeometryCache =
+    new Map<string, THREE.PlaneGeometry>();
 
-  private static readonly sidewalkGeometryCache = new Map<
-    string,
-    THREE.BoxGeometry
-  >();
+  private static readonly sidewalkGeometryCache =
+    new Map<string, THREE.BoxGeometry>();
 
-  private static readonly centerLineGeometry = new THREE.BoxGeometry(
-    0.12,
-    Road.CENTER_LINE_THICKNESS,
-    Road.CENTER_LINE_LENGTH,
-  );
+  private static readonly centerLineGeometry =
+    new THREE.BoxGeometry(
+      0.12,
+      Road.CENTER_LINE_THICKNESS,
+      Road.CENTER_LINE_LENGTH,
+    );
 
   /**
    * ==========================================
@@ -113,11 +120,14 @@ export class Road {
   /**
    * جهت محلی Road همیشه +Z است.
    */
-  public readonly localDirection = new THREE.Vector3(0, 0, 1);
+  public readonly localDirection =
+    new THREE.Vector3(0, 0, 1);
 
-  private readonly tempWorldOrigin = new THREE.Vector3();
+  private readonly tempWorldOrigin =
+    new THREE.Vector3();
 
-  private readonly tempWorldDirection = new THREE.Vector3();
+  private readonly tempWorldDirection =
+    new THREE.Vector3();
 
   /**
    * ==========================================
@@ -125,21 +135,28 @@ export class Road {
    * ==========================================
    */
 
-  constructor(width: number = Road.WIDTH, length: number = Road.LENGTH) {
+  constructor(
+    width: number = Road.WIDTH,
+    length: number = Road.LENGTH,
+  ) {
     if (!Number.isFinite(width) || width <= 0) {
-      throw new Error(`[Road] Invalid width: ${width}`);
+      throw new Error(
+        `[Road] Invalid width: ${width}`,
+      );
     }
 
     if (!Number.isFinite(length) || length <= 0) {
-      throw new Error(`[Road] Invalid length: ${length}`);
+      throw new Error(
+        `[Road] Invalid length: ${length}`,
+      );
     }
 
     this.roadWidth = width;
     this.roadLength = length;
 
     this.group = new THREE.Group();
-    this.group.name = "Road";
 
+    this.group.name = "Road";
     this.group.userData.isRoad = true;
     this.group.userData.road = this;
 
@@ -160,7 +177,10 @@ export class Road {
   }
 
   public getLaneOffsets(): number[] {
-    return [Road.LANE_OFFSET_NEGATIVE, Road.LANE_OFFSET_POSITIVE];
+    return [
+      Road.LANE_OFFSET_NEGATIVE,
+      Road.LANE_OFFSET_POSITIVE,
+    ];
   }
 
   public getLaneOffset(laneIndex: number): number {
@@ -169,7 +189,9 @@ export class Road {
       laneIndex < 0 ||
       laneIndex >= Road.LANE_COUNT
     ) {
-      throw new Error(`[Road] Invalid lane index: ${laneIndex}`);
+      throw new Error(
+        `[Road] Invalid lane index: ${laneIndex}`,
+      );
     }
 
     return laneIndex === 0
@@ -192,7 +214,10 @@ export class Road {
     laneIndex: number,
     localDistance: number,
   ): THREE.Vector3 {
-    const position = this.getLanePosition(laneIndex, localDistance);
+    const position = this.getLanePosition(
+      laneIndex,
+      localDistance,
+    );
 
     this.group.localToWorld(position);
 
@@ -212,13 +237,21 @@ export class Road {
   public getWorldDirection(): THREE.Vector3 {
     this.tempWorldOrigin.set(0, 0, 0);
 
-    this.tempWorldDirection.copy(this.localDirection);
+    this.tempWorldDirection.copy(
+      this.localDirection,
+    );
 
-    this.group.localToWorld(this.tempWorldOrigin);
+    this.group.localToWorld(
+      this.tempWorldOrigin,
+    );
 
-    this.group.localToWorld(this.tempWorldDirection);
+    this.group.localToWorld(
+      this.tempWorldDirection,
+    );
 
-    this.tempWorldDirection.sub(this.tempWorldOrigin).normalize();
+    this.tempWorldDirection
+      .sub(this.tempWorldOrigin)
+      .normalize();
 
     return this.tempWorldDirection.clone();
   }
@@ -275,25 +308,28 @@ export class Road {
 
   private initializeMaterials(): void {
     if (!Road.roadMaterial) {
-      Road.roadMaterial = new THREE.MeshStandardMaterial({
-        color: 0x3d3f42,
-        roughness: 0.92,
-        metalness: 0,
-      });
+      Road.roadMaterial =
+        new THREE.MeshStandardMaterial({
+          color: 0x3d3f42,
+          roughness: 0.92,
+          metalness: 0,
+        });
     }
 
     if (!Road.sidewalkMaterial) {
-      Road.sidewalkMaterial = new THREE.MeshStandardMaterial({
-        color: 0xa6a6a1,
-        roughness: 0.95,
-        metalness: 0,
-      });
+      Road.sidewalkMaterial =
+        new THREE.MeshStandardMaterial({
+          color: 0xa6a6a1,
+          roughness: 0.95,
+          metalness: 0,
+        });
     }
 
     if (!Road.markingMaterial) {
-      Road.markingMaterial = new THREE.MeshBasicMaterial({
-        color: 0xf4f0d0,
-      });
+      Road.markingMaterial =
+        new THREE.MeshBasicMaterial({
+          color: 0xf4f0d0,
+        });
     }
   }
 
@@ -304,23 +340,35 @@ export class Road {
    */
 
   private createRoadSurface(): void {
-    const geometryKey = `${this.roadWidth}_${this.roadLength}`;
+    const geometryKey =
+      `${this.roadWidth}_${this.roadLength}`;
 
-    let geometry = Road.roadGeometryCache.get(geometryKey);
+    let geometry =
+      Road.roadGeometryCache.get(geometryKey);
 
     if (!geometry) {
-      geometry = new THREE.PlaneGeometry(this.roadWidth, this.roadLength);
+      geometry = new THREE.PlaneGeometry(
+        this.roadWidth,
+        this.roadLength,
+      );
 
       geometry.rotateX(-Math.PI / 2);
 
-      Road.roadGeometryCache.set(geometryKey, geometry);
+      Road.roadGeometryCache.set(
+        geometryKey,
+        geometry,
+      );
     }
 
-    const mesh = new THREE.Mesh(geometry, Road.roadMaterial!);
+    const mesh = new THREE.Mesh(
+      geometry,
+      Road.roadMaterial!,
+    );
 
     mesh.name = "RoadSurface";
 
-    mesh.position.y = Road.ROAD_SURFACE_Y;
+    mesh.position.y =
+      Road.ROAD_SURFACE_Y;
 
     mesh.receiveShadow = false;
     mesh.castShadow = false;
@@ -358,21 +406,27 @@ export class Road {
    */
 
   private createSidewalks(): void {
-    const intersectionMin = this.getIntersectionMin();
+    const intersectionMin =
+      this.getIntersectionMin();
 
-    const intersectionMax = this.getIntersectionMax();
+    const intersectionMax =
+      this.getIntersectionMax();
 
-    const roadMin = this.getLongitudinalMin();
+    const roadMin =
+      this.getLongitudinalMin();
 
-    const roadMax = this.getLongitudinalMax();
+    const roadMax =
+      this.getLongitudinalMax();
 
     /**
      * قسمت قبل از چهارراه.
      */
-    const beforeLength = intersectionMin - roadMin;
+    const beforeLength =
+      intersectionMin - roadMin;
 
     if (beforeLength > 0) {
-      const beforeCenter = roadMin + beforeLength / 2;
+      const beforeCenter =
+        roadMin + beforeLength / 2;
 
       this.createSidewalkSegment(
         beforeCenter,
@@ -384,12 +438,18 @@ export class Road {
     /**
      * قسمت بعد از چهارراه.
      */
-    const afterLength = roadMax - intersectionMax;
+    const afterLength =
+      roadMax - intersectionMax;
 
     if (afterLength > 0) {
-      const afterCenter = intersectionMax + afterLength / 2;
+      const afterCenter =
+        intersectionMax + afterLength / 2;
 
-      this.createSidewalkSegment(afterCenter, afterLength, "AfterIntersection");
+      this.createSidewalkSegment(
+        afterCenter,
+        afterLength,
+        "AfterIntersection",
+      );
     }
   }
 
@@ -400,12 +460,9 @@ export class Road {
    *
    * یک قطعه پیاده‌رو در هر دو طرف Road می‌سازد.
    *
-   * نکته:
-   *
    * پیاده‌رو عملاً روی لبه‌ی آسفالت قرار می‌گیرد
    * و بخش زیادی از عرض آن روی خود محدوده‌ی جاده
-   * قرار دارد تا ظاهر طبیعی‌تری ایجاد کند.
-   * ==========================================
+   * قرار دارد تا ظاهر طبیعی‌تری ایجاد شود.
    */
 
   private createSidewalkSegment(
@@ -417,15 +474,24 @@ export class Road {
       return;
     }
 
-    const geometry = this.getSidewalkGeometry(length);
+    const geometry =
+      this.getSidewalkGeometry(length);
 
-    const leftSidewalk = new THREE.Mesh(geometry, Road.sidewalkMaterial!);
+    const leftSidewalk = new THREE.Mesh(
+      geometry,
+      Road.sidewalkMaterial!,
+    );
 
-    const rightSidewalk = new THREE.Mesh(geometry, Road.sidewalkMaterial!);
+    const rightSidewalk = new THREE.Mesh(
+      geometry,
+      Road.sidewalkMaterial!,
+    );
 
-    leftSidewalk.name = `RoadSidewalk_Left_${suffix}`;
+    leftSidewalk.name =
+      `RoadSidewalk_Left_${suffix}`;
 
-    rightSidewalk.name = `RoadSidewalk_Right_${suffix}`;
+    rightSidewalk.name =
+      `RoadSidewalk_Right_${suffix}`;
 
     /**
      * پیاده‌روها کمی داخل محدوده‌ی Road قرار
@@ -435,7 +501,9 @@ export class Road {
      *
      * ±(WIDTH / 2 - WIDTH_SIDEWALK / 2)
      */
-    const sidewalkOffset = this.roadWidth / 2 - Road.SIDEWALK_WIDTH / 2;
+    const sidewalkOffset =
+      this.roadWidth / 2 -
+      Road.SIDEWALK_WIDTH / 2;
 
     leftSidewalk.position.set(
       -sidewalkOffset,
@@ -464,7 +532,10 @@ export class Road {
     leftSidewalk.userData.road = this;
     rightSidewalk.userData.road = this;
 
-    this.group.add(leftSidewalk, rightSidewalk);
+    this.group.add(
+      leftSidewalk,
+      rightSidewalk,
+    );
   }
 
   /**
@@ -473,10 +544,16 @@ export class Road {
    * ==========================================
    */
 
-  private getSidewalkGeometry(length: number): THREE.BoxGeometry {
-    const geometryKey = `${Road.SIDEWALK_WIDTH}_${Road.SIDEWALK_HEIGHT}_${length}`;
+  private getSidewalkGeometry(
+    length: number,
+  ): THREE.BoxGeometry {
+    const geometryKey =
+      `${Road.SIDEWALK_WIDTH}_${Road.SIDEWALK_HEIGHT}_${length}`;
 
-    let geometry = Road.sidewalkGeometryCache.get(geometryKey);
+    let geometry =
+      Road.sidewalkGeometryCache.get(
+        geometryKey,
+      );
 
     if (!geometry) {
       geometry = new THREE.BoxGeometry(
@@ -485,7 +562,10 @@ export class Road {
         length,
       );
 
-      Road.sidewalkGeometryCache.set(geometryKey, geometry);
+      Road.sidewalkGeometryCache.set(
+        geometryKey,
+        geometry,
+      );
     }
 
     return geometry;
@@ -498,27 +578,45 @@ export class Road {
    */
 
   private createRoadMarkings(): void {
-    const start = this.getLongitudinalMin() + Road.INTERSECTION_LINE_PADDING;
+    const start =
+      this.getLongitudinalMin() +
+      Road.INTERSECTION_LINE_PADDING;
 
-    const end = this.getLongitudinalMax() - Road.INTERSECTION_LINE_PADDING;
+    const end =
+      this.getLongitudinalMax() -
+      Road.INTERSECTION_LINE_PADDING;
 
-    const intersectionMin = this.getIntersectionMin();
+    const intersectionMin =
+      this.getIntersectionMin();
 
-    const intersectionMax = this.getIntersectionMax();
+    const intersectionMax =
+      this.getIntersectionMax();
 
-    this.createMarkingSegment(start, intersectionMin);
+    this.createMarkingSegment(
+      start,
+      intersectionMin,
+    );
 
-    this.createMarkingSegment(intersectionMax, end);
+    this.createMarkingSegment(
+      intersectionMax,
+      end,
+    );
   }
 
-  private createMarkingSegment(start: number, end: number): void {
+  private createMarkingSegment(
+    start: number,
+    end: number,
+  ): void {
     if (end <= start) {
       return;
     }
 
-    const step = Road.CENTER_LINE_LENGTH + Road.CENTER_LINE_GAP;
+    const step =
+      Road.CENTER_LINE_LENGTH +
+      Road.CENTER_LINE_GAP;
 
-    const halfLine = Road.CENTER_LINE_LENGTH / 2;
+    const halfLine =
+      Road.CENTER_LINE_LENGTH / 2;
 
     for (
       let distance = start + halfLine;
@@ -532,14 +630,17 @@ export class Road {
 
       line.name = "RoadCenterLine";
 
-      line.position.set(0, Road.CENTER_LINE_Y, distance);
+      line.position.set(
+        0,
+        Road.CENTER_LINE_Y,
+        distance,
+      );
 
       line.castShadow = false;
       line.receiveShadow = false;
       line.frustumCulled = true;
 
       line.userData.isRoadMarking = true;
-
       line.userData.road = this;
 
       this.group.add(line);
@@ -552,17 +653,25 @@ export class Road {
    * ==========================================
    */
 
-  public isDistanceInsideRoad(distance: number): boolean {
+  public isDistanceInsideRoad(
+    distance: number,
+  ): boolean {
     return (
-      distance >= this.getLongitudinalMin() &&
-      distance <= this.getLongitudinalMax()
+      distance >=
+        this.getLongitudinalMin() &&
+      distance <=
+        this.getLongitudinalMax()
     );
   }
 
-  public isDistanceInsideIntersection(distance: number): boolean {
+  public isDistanceInsideIntersection(
+    distance: number,
+  ): boolean {
     return (
-      distance >= this.getIntersectionMin() &&
-      distance <= this.getIntersectionMax()
+      distance >=
+        this.getIntersectionMin() &&
+      distance <=
+        this.getIntersectionMax()
     );
   }
 

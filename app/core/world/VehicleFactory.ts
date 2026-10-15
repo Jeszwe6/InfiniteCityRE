@@ -2,359 +2,247 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 
-import {
-  Vehicle,
-  type VehicleModelType,
-} from "./Vehicle";
+import { Vehicle, type VehicleModelType } from "./Vehicle";
 
-/**
- * ==========================================
- * VehicleFactory
- * ==========================================
- *
- * مسئول:
- *
- * - Load کردن مدل‌های GLB
- * - نگهداری Cache مدل‌ها
- * - ساخت Vehicle جدید از روی مدل Cache شده
- * - ساخت Pool خودروها
- * - مدیریت Loading
- *
- * نکته:
- * مدل اصلی هیچ‌وقت مستقیماً به Vehicle داده نمی‌شود.
- * برای هر Vehicle یک Clone مستقل ساخته می‌شود.
- */
 export class VehicleFactory {
-  /**
-   * ==========================================
-   * Model Paths
-   * ==========================================
-   */
-
-  private static readonly VEHICLE_MODELS: Record<
-    VehicleModelType,
-    string
-  > = {
-    taxi:
-      "/assets/vehicles/Models/GLB%20format/taxi.glb",
-
-    sedan:
-      "/assets/vehicles/Models/GLB%20format/sedan.glb",
-
-    "sedan-sports":
-      "/assets/vehicles/Models/GLB%20format/sedan-sports.glb",
-
+  private static readonly VEHICLE_MODELS: Record<VehicleModelType, string> = {
+    taxi: "/assets/vehicles/Models/GLB%20format/taxi.glb",
+    sedan: "/assets/vehicles/Models/GLB%20format/sedan.glb",
+    "sedan-sports": "/assets/vehicles/Models/GLB%20format/sedan-sports.glb",
     "hatchback-sports":
       "/assets/vehicles/Models/GLB%20format/hatchback-sports.glb",
-
-    suv:
-      "/assets/vehicles/Models/GLB%20format/suv.glb",
-
-    "suv-luxury":
-      "/assets/vehicles/Models/GLB%20format/suv-luxury.glb",
-
-    van:
-      "/assets/vehicles/Models/GLB%20format/van.glb",
-
-    delivery:
-      "/assets/vehicles/Models/GLB%20format/delivery.glb",
-
-    truck:
-      "/assets/vehicles/Models/GLB%20format/truck.glb",
-
-    "truck-flat":
-      "/assets/vehicles/Models/GLB%20format/truck-flat.glb",
-
-    police:
-      "/assets/vehicles/Models/GLB%20format/police.glb",
-
-    ambulance:
-      "/assets/vehicles/Models/GLB%20format/ambulance.glb",
-
-    firetruck:
-      "/assets/vehicles/Models/GLB%20format/firetruck.glb",
-
-    "garbage-truck":
-      "/assets/vehicles/Models/GLB%20format/garbage-truck.glb",
-
-    race:
-      "/assets/vehicles/Models/GLB%20format/race.glb",
-
-    "race-future":
-      "/assets/vehicles/Models/GLB%20format/race-future.glb",
-
-    tractor:
-      "/assets/vehicles/Models/GLB%20format/tractor.glb",
+    suv: "/assets/vehicles/Models/GLB%20format/suv.glb",
+    "suv-luxury": "/assets/vehicles/Models/GLB%20format/suv-luxury.glb",
+    van: "/assets/vehicles/Models/GLB%20format/van.glb",
+    delivery: "/assets/vehicles/Models/GLB%20format/delivery.glb",
+    truck: "/assets/vehicles/Models/GLB%20format/truck.glb",
+    "truck-flat": "/assets/vehicles/Models/GLB%20format/truck-flat.glb",
+    police: "/assets/vehicles/Models/GLB%20format/police.glb",
+    ambulance: "/assets/vehicles/Models/GLB%20format/ambulance.glb",
+    firetruck: "/assets/vehicles/Models/GLB%20format/firetruck.glb",
+    "garbage-truck": "/assets/vehicles/Models/GLB%20format/garbage-truck.glb",
+    race: "/assets/vehicles/Models/GLB%20format/race.glb",
+    "race-future": "/assets/vehicles/Models/GLB%20format/race-future.glb",
+    tractor: "/assets/vehicles/Models/GLB%20format/tractor.glb",
   };
-
-  /**
-   * ==========================================
-   * Internal State
-   * ==========================================
-   */
 
   private readonly loader: GLTFLoader;
 
-  private readonly models =
-    new Map<
-      VehicleModelType,
-      THREE.Group
-    >();
+  private readonly models = new Map<VehicleModelType, THREE.Group>();
 
-  private readonly loading =
-    new Map<
-      VehicleModelType,
-      Promise<THREE.Group>
-    >();
+  private readonly loading = new Map<VehicleModelType, Promise<THREE.Group>>();
 
-  /**
-   * ==========================================
-   * Constructor
-   * ==========================================
-   */
+  private disposed = false;
+  private generation = 0;
 
   constructor() {
     this.loader = new GLTFLoader();
   }
 
-  /**
-   * ==========================================
-   * Get All Model Types
-   * ==========================================
-   */
-
   public getAllModelTypes(): VehicleModelType[] {
-    return Object.keys(
-      VehicleFactory.VEHICLE_MODELS,
-    ) as VehicleModelType[];
+    return Object.keys(VehicleFactory.VEHICLE_MODELS) as VehicleModelType[];
   }
 
-  /**
-   * ==========================================
-   * Get Model Path
-   * ==========================================
-   */
-
-  public getModelPath(
-    type: VehicleModelType,
-  ): string {
+  public getModelPath(type: VehicleModelType): string {
     return VehicleFactory.VEHICLE_MODELS[type];
   }
 
-  /**
-   * ==========================================
-   * Is Loaded
-   * ==========================================
-   */
-
-  public isLoaded(
-    type: VehicleModelType,
-  ): boolean {
+  public isLoaded(type: VehicleModelType): boolean {
     return this.models.has(type);
   }
 
-  /**
-   * ==========================================
-   * Is Loading
-   * ==========================================
-   */
-
-  public isLoading(
-    type: VehicleModelType,
-  ): boolean {
+  public isLoading(type: VehicleModelType): boolean {
     return this.loading.has(type);
   }
 
-  /**
-   * ==========================================
-   * Load Model
-   * ==========================================
-   */
+  private ensureNotDisposed(): void {
+    if (this.disposed) {
+      throw new Error("VehicleFactory has already been disposed.");
+    }
+  }
 
-  private loadModel(
-    type: VehicleModelType,
-  ): Promise<THREE.Group> {
-    const cached =
-      this.models.get(type);
+  private disposeModelResources(root: THREE.Object3D): void {
+    const geometries = new Set<THREE.BufferGeometry>();
+    const materials = new Set<THREE.Material>();
+    const textures = new Set<THREE.Texture>();
+
+    const collectTextures = (value: unknown): void => {
+      if (value instanceof THREE.Texture) {
+        textures.add(value);
+        return;
+      }
+
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          collectTextures(item);
+        }
+      }
+    };
+
+    root.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+
+      if (!mesh.isMesh) {
+        return;
+      }
+
+      if (mesh.geometry) {
+        geometries.add(mesh.geometry);
+      }
+
+      const meshMaterials = Array.isArray(mesh.material)
+        ? mesh.material
+        : mesh.material
+          ? [mesh.material]
+          : [];
+
+      for (const material of meshMaterials) {
+        materials.add(material);
+
+        for (const value of Object.values(material)) {
+          collectTextures(value);
+        }
+      }
+    });
+
+    for (const geometry of geometries) {
+      geometry.dispose();
+    }
+
+    for (const material of materials) {
+      material.dispose();
+    }
+
+    for (const texture of textures) {
+      texture.dispose();
+    }
+  }
+
+  private loadModel(type: VehicleModelType): Promise<THREE.Group> {
+    this.ensureNotDisposed();
+
+    const cached = this.models.get(type);
 
     if (cached) {
       return Promise.resolve(cached);
     }
 
-    const currentLoading =
-      this.loading.get(type);
+    const currentLoading = this.loading.get(type);
 
     if (currentLoading) {
       return currentLoading;
     }
 
-    const path =
-      this.getModelPath(type);
+    const path = this.getModelPath(type);
+    const generation = this.generation;
 
-    const promise =
-      new Promise<THREE.Group>(
-        (
-          resolve,
-          reject,
-        ) => {
-          this.loader.load(
-            path,
+    let request: Promise<THREE.Group> | undefined;
 
-            (gltf) => {
-              const model =
-                gltf.scene;
+    request = new Promise<THREE.Group>((resolve, reject) => {
+      this.loader.load(
+        path,
+        (gltf) => {
+          const model = gltf.scene;
 
-              model.traverse(
-                (object) => {
-                  const mesh =
-                    object as THREE.Mesh;
+          if (this.disposed || generation !== this.generation) {
+            this.disposeModelResources(model);
 
-                  if (
-                    mesh.isMesh
-                  ) {
-                    mesh.castShadow =
-                      false;
+            reject(
+              new Error(
+                `Loading vehicle model "${type}" was cancelled because VehicleFactory was disposed.`,
+              ),
+            );
 
-                    mesh.receiveShadow =
-                      false;
+            return;
+          }
 
-                    if (
-                      mesh.material
-                    ) {
-                      const material =
-                        mesh.material as
-                          | THREE.Material
-                          | THREE.Material[];
+          model.traverse((object) => {
+            const mesh = object as THREE.Mesh;
 
-                      if (
-                        Array.isArray(
-                          material,
-                        )
-                      ) {
-                        for (
-                          const item of
-                            material
-                        ) {
-                          item.needsUpdate =
-                            true;
-                        }
-                      } else {
-                        material.needsUpdate =
-                          true;
-                      }
-                    }
-                  }
-                },
-              );
+            if (!mesh.isMesh) {
+              return;
+            }
 
-              this.models.set(
-                type,
-                model,
-              );
+            mesh.castShadow = false;
+            mesh.receiveShadow = false;
 
-              this.loading.delete(
-                type,
-              );
+            const materials = Array.isArray(mesh.material)
+              ? mesh.material
+              : mesh.material
+                ? [mesh.material]
+                : [];
 
-              resolve(model);
-            },
+            for (const material of materials) {
+              material.needsUpdate = true;
+            }
+          });
 
-            undefined,
+          this.models.set(type, model);
 
-            (error) => {
-              this.loading.delete(
-                type,
-              );
+          if (this.loading.get(type) === request) {
+            this.loading.delete(type);
+          }
 
-              reject(error);
-            },
-          );
+          resolve(model);
+        },
+        undefined,
+        (error) => {
+          if (this.loading.get(type) === request) {
+            this.loading.delete(type);
+          }
+
+          reject(error);
         },
       );
+    });
 
-    this.loading.set(
-      type,
-      promise,
-    );
+    this.loading.set(type, request);
 
-    return promise;
+    return request;
   }
 
-  /**
-   * ==========================================
-   * Preload
-   * ==========================================
-   */
-
-  public async preload(
-    type: VehicleModelType,
-  ): Promise<void> {
+  public async preload(type: VehicleModelType): Promise<void> {
     await this.loadModel(type);
   }
 
-  /**
-   * ==========================================
-   * Preload All
-   * ==========================================
-   */
-
   public async preloadAll(): Promise<void> {
-    const types =
-      this.getAllModelTypes();
+    this.ensureNotDisposed();
 
-    await Promise.all(
-      types.map(
-        (type) =>
-          this.preload(type),
-      ),
-    );
+    const types = this.getAllModelTypes();
+
+    await Promise.all(types.map((type) => this.preload(type)));
   }
 
-  /**
-   * ==========================================
-   * Create Vehicle
-   * ==========================================
-   */
+  public async createVehicle(type: VehicleModelType): Promise<Vehicle> {
+    this.ensureNotDisposed();
 
-  public async createVehicle(
-    type: VehicleModelType,
-  ): Promise<Vehicle> {
-    const originalModel =
-      await this.loadModel(type);
+    const generation = this.generation;
+    const originalModel = await this.loadModel(type);
 
-    const clonedModel =
-      cloneSkeleton(
-        originalModel,
+    if (this.disposed || generation !== this.generation) {
+      throw new Error(
+        "Vehicle creation was cancelled because VehicleFactory was disposed.",
       );
+    }
 
-    const vehicleGroup =
-      new THREE.Group();
+    const clonedModel = cloneSkeleton(originalModel);
+    const vehicleGroup = new THREE.Group();
 
-    vehicleGroup.add(
-      clonedModel,
-    );
+    vehicleGroup.add(clonedModel);
 
-    const vehicle =
-      new Vehicle(
-        vehicleGroup,
-        type,
-      );
+    const vehicle = new Vehicle(vehicleGroup, type);
 
     vehicle.reset();
 
     return vehicle;
   }
 
-  /**
-   * ==========================================
-   * Create Vehicles
-   * ==========================================
-   */
-
   public async createVehicles(
     type: VehicleModelType,
     count: number,
   ): Promise<Vehicle[]> {
+    this.ensureNotDisposed();
+
     if (count <= 0) {
       return [];
     }
@@ -363,65 +251,27 @@ export class VehicleFactory {
 
     const vehicles: Vehicle[] = [];
 
-    for (
-      let i = 0;
-      i < count;
-      i++
-    ) {
-      const vehicle =
-        await this.createVehicle(
-          type,
-        );
+    for (let i = 0; i < count; i++) {
+      this.ensureNotDisposed();
 
-      vehicles.push(
-        vehicle,
-      );
+      const vehicle = await this.createVehicle(type);
+
+      vehicles.push(vehicle);
     }
 
     return vehicles;
   }
 
-  /**
-   * ==========================================
-   * Dispose
-   * ==========================================
-   */
-
   public dispose(): void {
-    for (
-      const model of
-        this.models.values()
-    ) {
-      model.traverse(
-        (object) => {
-          const mesh =
-            object as THREE.Mesh;
+    if (this.disposed) {
+      return;
+    }
 
-          if (!mesh.isMesh) {
-            return;
-          }
+    this.disposed = true;
+    this.generation++;
 
-          mesh.geometry.dispose();
-
-          const material =
-            mesh.material;
-
-          if (
-            Array.isArray(
-              material,
-            )
-          ) {
-            for (
-              const item of
-                material
-            ) {
-              item.dispose();
-            }
-          } else {
-            material.dispose();
-          }
-        },
-      );
+    for (const model of this.models.values()) {
+      this.disposeModelResources(model);
     }
 
     this.models.clear();
